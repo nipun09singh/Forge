@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  {{ slug }}:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - FORGE_MODEL=${FORGE_MODEL:-{{ model }}}
+      {% for key, val in env_vars.items() %}
+      - {{ key }}=${{'{'}}{{ key }}:-{{ val }}{{'}'}}
+      {% endfor %}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

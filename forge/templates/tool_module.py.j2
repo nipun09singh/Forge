@@ -1,0 +1,39 @@
+"""Custom tool: {{ tool_name }}"""
+
+from forge.runtime import Tool, ToolParameter
+
+
+async def {{ tool_name }}({{ parameters | map(attribute='name') | join(', ') }}) -> str:
+    """
+    {{ description }}
+
+    {% if implementation_hint %}
+    Implementation notes: {{ implementation_hint }}
+    {% endif %}
+    """
+    # TODO: Implement this tool
+    # This is a generated stub — replace with real logic
+    result = {
+        "tool": "{{ tool_name }}",
+        {% for param in parameters %}
+        "{{ param.name }}": {{ param.name }},
+        {% endfor %}
+    }
+    return str(result)
+
+
+{{ tool_name }}_tool = Tool(
+    name="{{ tool_name }}",
+    description="{{ description }}",
+    parameters=[
+        {% for param in parameters %}
+        ToolParameter(
+            name="{{ param.name }}",
+            type="{{ param.type }}",
+            description="{{ param.description }}",
+            required={{ param.get('required', True) }},
+        ),
+        {% endfor %}
+    ],
+    _fn={{ tool_name }},
+)

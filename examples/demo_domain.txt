@@ -1,0 +1,19 @@
+E-Commerce Customer Support Agency
+
+Domain: Online retail customer support for a mid-size e-commerce platform.
+
+Key functions:
+- Handle customer inquiries about orders, shipping, returns, and refunds
+- Process return and refund requests
+- Escalate complex issues to human supervisors
+- Track order status and provide updates
+- Manage product information queries
+- Handle billing and payment issues
+- Collect customer feedback and satisfaction surveys
+
+Integrations needed:
+- Order management system
+- Payment processing
+- Shipping tracking APIs
+- Customer database (CRM)
+- Knowledge base for product info and policies

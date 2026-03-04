@@ -1,0 +1,35 @@
+"""{{ agent_name }} — {{ title }}"""
+
+from forge.runtime import Agent, Tool, ToolParameter
+
+{% for tool in tools %}
+async def {{ tool.name }}({{ tool.parameters | map(attribute='name') | join(', ') }}):
+    """{{ tool.description }}"""
+    # TODO: Implement {{ tool.name }}
+    # Hint: {{ tool.implementation_hint }}
+    return f"{{ tool.name }} result"
+
+{{ tool.name }}_tool = Tool(
+    name="{{ tool.name }}",
+    description="{{ tool.description }}",
+    parameters=[
+        {% for param in tool.parameters %}
+        ToolParameter(name="{{ param['name'] }}", type="{{ param['type'] }}", description="{{ param['description'] }}", required={{ param.get('required', True) }}),
+        {% endfor %}
+    ],
+    _fn={{ tool.name }},
+)
+{% endfor %}
+
+
+def create_{{ agent_name | lower | replace(' ', '_') }}_agent() -> Agent:
+    """Create and return the {{ agent_name }} agent."""
+    return Agent(
+        name="{{ agent_name }}",
+        role="{{ role }}",
+        system_prompt="""{{ system_prompt }}""",
+        tools=[{% for tool in tools %}{{ tool.name }}_tool, {% endfor %}],
+        model="{{ model }}",
+        temperature={{ temperature }},
+        max_iterations={{ max_iterations }},
+    )

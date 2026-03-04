@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-agency"
+version = "0.1.0"
+description = "Forge: AI Agency Meta-Factory — generates complete, deployable AI agencies from domain descriptions"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.12.0",
+    "pydantic>=2.5.0",
+    "click>=8.1.0",
+    "jinja2>=3.1.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "rich>=13.7.0",
+    "aiofiles>=23.2.0",
+]
+
+[project.scripts]
+forge = "forge.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.0", "pytest-asyncio>=0.23.0", "ruff>=0.2.0"]

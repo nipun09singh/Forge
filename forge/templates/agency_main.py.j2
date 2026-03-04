@@ -1,0 +1,442 @@
+"""{{ agency_name }} — AI Agency powered by Forge Runtime."""
+
+import asyncio
+import json
+import logging
+import os
+
+# ─── Required imports ─────────────────────────────────────
+from forge.runtime import Agency, Agent, Team, Tool, ToolParameter
+from forge.runtime.improvement import QualityGate, PerformanceTracker, FeedbackCollector
+from forge.runtime.planner import Planner
+from forge.runtime.observability import EventLog, TraceContext, CostTracker
+from forge.runtime.memory import SharedMemory
+from forge.runtime.integrations import BuiltinToolkit
+
+# ─── Optional imports (graceful degradation) ──────────────
+try:
+    from forge.runtime.persistence import SQLiteMemoryBackend
+except ImportError:
+    SQLiteMemoryBackend = None
+
+try:
+    from forge.runtime.human import HumanApprovalGate, Urgency
+except ImportError:
+    HumanApprovalGate = None
+    Urgency = None
+
+try:
+    from forge.runtime.revenue_tracker import RevenueTracker
+except ImportError:
+    RevenueTracker = None
+
+try:
+    from forge.runtime.failure_predictor import FailurePredictor
+except ImportError:
+    FailurePredictor = None
+
+try:
+    from forge.runtime.model_router import ModelRouter
+except ImportError:
+    ModelRouter = None
+
+try:
+    from forge.runtime.checkpointing import CheckpointStore
+except ImportError:
+    CheckpointStore = None
+
+try:
+    from forge.runtime.build_loop import BuildLoop
+except ImportError:
+    BuildLoop = None
+
+try:
+    from forge.runtime.archetype_tools import get_archetype_tools, set_shared_infrastructure
+except ImportError:
+    get_archetype_tools = None
+    set_shared_infrastructure = None
+
+try:
+    from forge.runtime.messages import MessageBus
+except ImportError:
+    MessageBus = None
+
+try:
+    from forge.runtime.customer_comms import CustomerCommunicationHub
+except ImportError:
+    CustomerCommunicationHub = None
+
+try:
+    from forge.runtime.negotiation import NegotiationEngine
+except ImportError:
+    NegotiationEngine = None
+
+try:
+    from forge.runtime.ab_testing import ABTestManager
+except ImportError:
+    ABTestManager = None
+
+try:
+    from forge.runtime.guardrails import GuardrailsEngine, ContentFilter, ActionLimiter, ScopeGuard
+except ImportError:
+    GuardrailsEngine = None
+    ContentFilter = None
+    ActionLimiter = None
+    ScopeGuard = None
+
+try:
+    from forge.runtime.logging_config import setup_logging
+    setup_logging(level=os.getenv("FORGE_LOG_LEVEL", "INFO"), json_format=os.getenv("FORGE_JSON_LOGS", "").lower() == "true")
+except ImportError:
+    pass
+
+try:
+    from forge.runtime.scheduler import Scheduler, TaskSchedule
+except ImportError:
+    Scheduler = None
+    TaskSchedule = None
+
+try:
+    from forge.runtime.streaming import StreamingResponse, TokenChunk, stream_llm_response, stream_agent_execution
+except ImportError:
+    StreamingResponse = None
+    TokenChunk = None
+    stream_llm_response = None
+    stream_agent_execution = None
+
+try:
+    from forge.runtime.primitives import (
+        SimplePlanner, SequentialPlanner, DAGPlanner, ClassifyAndRoutePlanner,
+        SingleShotExecutor, ReActExecutor, MultiStepExecutor,
+        BinaryCritic, ScoredCritic, FactualCritic, ComplianceCritic,
+        EscalationPolicy, EscalationLevel, EscalationStep,
+    )
+    from forge.runtime.knowledge import DomainKnowledge, get_domain_knowledge
+    from forge.core.agent_configurator import AgentConfigurator
+    _has_primitives = True
+except ImportError:
+    _has_primitives = False
+
+logger = logging.getLogger("{{ slug }}")
+
+# ═══════════════════════════════════════════════════════════
+# Built-in tool integrations (real, working tools)
+# ═══════════════════════════════════════════════════════════
+_builtin_tools = {t.name: t for t in BuiltinToolkit.all_tools(
+    sandbox_dir="./data",
+    db_path="./data/agency.db",
+)}
+
+# Add archetype tools (real implementations for QA, Intake, Growth, etc.)
+if get_archetype_tools:
+    _archetype_tools = get_archetype_tools()
+    _builtin_tools.update(_archetype_tools)
+
+{% for tool in shared_tools %}
+# --- Shared Tool: {{ tool.name }} ---
+{% if tool.name in ['http_request', 'send_email', 'query_database', 'read_write_file', 'send_webhook'] %}
+{{ tool.name }}_tool = _builtin_tools.get("{{ tool.name }}")
+{% else %}
+async def {{ tool.name }}({{ tool.parameters | map(attribute='name') | join(', ') }}):
+    """{{ tool.description }}"""
+    # Implementation needed for: {{ tool.name }}
+    return f"{{ tool.name }} executed"
+
+{{ tool.name }}_tool = Tool(
+    name="{{ tool.name }}",
+    description="{{ tool.description }}",
+    parameters=[
+        {% for param in tool.parameters %}
+        ToolParameter(name="{{ param.name }}", type="{{ param.type }}", description="{{ param.description }}", required={{ param.required | default(true) }}),
+        {% endfor %}
+    ],
+    _fn={{ tool.name }},
+)
+{% endif %}
+{% endfor %}
+
+
+def build_agency() -> tuple[Agency, EventLog]:
+    """Build and configure the {{ agency_name }} agency."""
+
+    # ─── Observability ────────────────────────────────────
+    cost_tracker = CostTracker()
+    event_log = EventLog(cost_tracker=cost_tracker)
+
+    # ─── Persistent Memory ────────────────────────────────
+    os.makedirs("./data", exist_ok=True)
+    memory = SharedMemory.persistent(db_path="./data/agency_memory.db")
+
+    # ─── Quality & Performance ────────────────────────────
+    performance_tracker = PerformanceTracker()
+    feedback_collector = FeedbackCollector()
+    quality_gate = QualityGate(min_score=0.8)
+
+    # ─── Human Approval (optional) ───────────────────────────
+    approval_gate = HumanApprovalGate(auto_approve_urgency=Urgency.LOW) if HumanApprovalGate else None
+
+    # ─── Guardrails (optional) ─────────────────────────────
+    guardrails = None
+    if GuardrailsEngine:
+        guardrails = GuardrailsEngine(
+            content_filter=ContentFilter(block_pii=os.getenv("FORGE_BLOCK_PII", "true").lower() == "true"),
+            action_limiter=ActionLimiter(
+                max_tool_calls=int(os.getenv("FORGE_MAX_TOOL_CALLS", "50")),
+                max_tokens=int(os.getenv("FORGE_MAX_TOKENS_PER_TASK", "100000")),
+            ),
+            scope_guard=ScopeGuard(),
+        )
+
+    # ─── Revenue Tracking (optional) ──────────────────────
+    revenue_tracker = RevenueTracker() if RevenueTracker else None
+
+    # ─── Failure Prediction (optional) ────────────────────
+    failure_predictor = FailurePredictor(performance_tracker=performance_tracker) if FailurePredictor else None
+
+    # ─── Smart Model Routing (optional) ──────────────────
+    model_router = None
+    if ModelRouter:
+        model_router = ModelRouter(
+            default_model=os.getenv("FORGE_MODEL", "{{ model }}"),
+            fast_model=os.getenv("FORGE_FAST_MODEL", "gpt-4o-mini"),
+            enabled=os.getenv("FORGE_SMART_ROUTING", "false").lower() == "true",
+        )
+
+    # ─── Customer Communication (optional) ────────────────
+    customer_comms = None
+    if CustomerCommunicationHub:
+        customer_comms = CustomerCommunicationHub(
+            webhook_url=os.getenv("CUSTOMER_WEBHOOK_URL", ""),
+            memory=memory,
+        )
+
+    # ─── Negotiation & A/B Testing (optional) ─────────────
+    negotiation_engine = NegotiationEngine() if NegotiationEngine else None
+    ab_test_manager = ABTestManager() if ABTestManager else None
+
+    # ─── Wire archetype tools to real infrastructure ───────
+    if set_shared_infrastructure:
+        set_shared_infrastructure(
+            memory=memory,
+            perf_tracker=performance_tracker,
+            cost_tracker=cost_tracker,
+            event_log=event_log,
+        )
+
+    # ─── Build Agency ─────────────────────────────────────
+    agency = Agency(
+        name="{{ agency_name }}",
+        description="{{ description }}",
+        model=os.getenv("FORGE_MODEL", "{{ model }}"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL"),
+    )
+    agency.memory = memory
+
+    # ─── Domain Knowledge & Primitives ─────────────────────
+    domain_knowledge = None
+    if _has_primitives:
+        domain_knowledge = get_domain_knowledge("{{ domain | default('') }}")
+        if domain_knowledge and domain_knowledge.policies:
+            memory.store("domain:knowledge", domain_knowledge.to_dict(), author="system", tags=["knowledge"])
+            logger.info(f"Loaded domain knowledge: {len(domain_knowledge.policies)} policies")
+
+        configurator = AgentConfigurator(domain="{{ domain | default('general') }}")
+
+    # ─── Checkpointing (optional) ────────────────────────────
+    if CheckpointStore:
+        agency.enable_checkpointing(db_path="./data/checkpoints.db")
+
+    {% for team in teams %}
+    # --- Team: {{ team.name }} ---
+    {% if team.lead %}
+    {{ team.name | pyname }}_lead = Agent(
+        name="{{ team.lead.name }}",
+        role="{{ team.lead.role }}",
+        system_prompt="""{{ team.lead.system_prompt }}""",
+        model="{{ team.lead.model }}",
+        temperature={{ team.lead.temperature }},
+        domain_knowledge=domain_knowledge if _has_primitives else None,
+    )
+    {% endif %}
+
+    {{ team.name | pyname }}_agents = [
+        {% for agent in team.agents %}
+        Agent(
+            name="{{ agent.name }}",
+            role="{{ agent.role }}",
+            system_prompt="""{{ agent.system_prompt }}""",
+            model="{{ agent.model }}",
+            temperature={{ agent.temperature }},
+            domain_knowledge=domain_knowledge if _has_primitives else None,
+            {% if agent.tools %}
+            tools=[t for t in [{% for t in agent.tools %}_builtin_tools.get("{{ t.name }}"), {% endfor %}] if t is not None],
+            {% endif %}
+        ),
+        {% endfor %}
+    ]
+
+    {{ team.name | pyname }}_team = Team(
+        name="{{ team.name }}",
+        {% if team.lead %}
+        lead={{ team.name | pyname }}_lead,
+        {% endif %}
+        agents={{ team.name | pyname }}_agents,
+        shared_memory=memory,
+    )
+    agency.add_team({{ team.name | pyname }}_team)
+    {% endfor %}
+
+    # ─── Wire observability, quality gates, and approval ──
+    for team in agency.teams.values():
+        all_agents = list(team.agents)
+        if team.lead:
+            all_agents.append(team.lead)
+        for agent in all_agents:
+            agent.enable_reflection = True
+            agent.set_quality_gate(quality_gate)
+            agent.set_performance_tracker(performance_tracker)
+            agent.set_event_log(event_log)
+            if guardrails:
+                agent.set_guardrails(guardrails)
+            if model_router:
+                agent.set_model_router(model_router)
+            # Give ALL agents access to primitive tools (file, command, http, sql)
+            for prim_tool in _builtin_tools.values():
+                if prim_tool and prim_tool.name not in [t.name for t in agent.tool_registry.list_tools()]:
+                    agent.tool_registry.register(prim_tool)
+            # Apply role-appropriate primitives
+            if _has_primitives:
+                agent_config = configurator.configure(agent_name=agent.name, role=agent.role)
+                # Set critic based on domain configuration
+                if agent_config.critic_type == "compliance" and agent_config.compliance_rules:
+                    agent._critic = ComplianceCritic(rules=agent_config.compliance_rules)
+                elif agent_config.critic_type == "factual":
+                    agent._critic = FactualCritic()
+                elif agent_config.critic_type == "scored":
+                    agent._critic = ScoredCritic(min_score=agent_config.critic_min_score)
+                elif agent_config.critic_type == "binary":
+                    agent._critic = BinaryCritic()
+
+    # ─── Initialize planner───────────────────────────────
+    agency.planner.set_llm_client(agency._llm_client)
+    agency.planner.set_teams(agency.teams)
+
+    # ─── Build Loop (for code-generating agents) ──────────
+    build_loop = BuildLoop(max_attempts=5) if BuildLoop else None
+    if build_loop:
+        agency._build_loop = build_loop
+
+    # Attach advanced features to agency for API access
+    agency._revenue_tracker = revenue_tracker
+    agency._failure_predictor = failure_predictor
+    agency._model_router = model_router
+    agency._customer_comms = customer_comms
+    agency._negotiation_engine = negotiation_engine
+    agency._ab_test_manager = ab_test_manager
+
+    # ═══════════════════════════════════════════════════════════
+    # Seed initial data so APIs aren't empty on Day 1
+    # ═══════════════════════════════════════════════════════════
+    memory.store("company:name", "{{ agency_name }}", author="system", tags=["config"])
+    memory.store("policy:refund", "Full refund within 30 days. Pro-rated after.", author="system", tags=["policy"])
+    memory.store("policy:escalation", "Escalate to human after 2 failed resolution attempts.", author="system", tags=["policy"])
+    memory.store("policy:response_time", "First response within 5 minutes. Resolution within 24 hours.", author="system", tags=["policy", "sla"])
+
+    if revenue_tracker:
+        from forge.runtime.revenue_tracker import RevenueEvent
+        revenue_tracker.record(RevenueEvent(event_type="task_automated", agent_name="System", value_usd=0, description="Agency initialized"))
+
+    logger.info("Seeded initial policies and configuration")
+
+    return agency, event_log
+
+
+async def main():
+    """Run the agency."""
+    agency, event_log = build_agency()
+    logger.info(f"Agency '{agency.name}' initialized: {agency}")
+    
+    print(f"\n🏢 {agency.name} is ready!")
+    print(f"   {agency.description}")
+    print(f"   Teams: {list(agency.teams.keys())}")
+    print(f"   💾 Memory: Persistent (SQLite)")
+    print(f"   📡 Observability: Event logging + cost tracking")
+    print(f"   📐 Planner: Enabled")
+    print(f"   ✅ Quality gates: Active (threshold 80%)")
+    print(f"\n   Type a task, 'plan: <task>' for complex tasks, or 'quit' to exit.\n")
+
+    while True:
+        try:
+            task = input("📋 Task> ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if task.lower() in ("quit", "exit", "q"):
+            break
+        if not task.strip():
+            continue
+
+        if task.lower() == "status":
+            print(f"\n📊 {agency.get_status()}")
+            print(f"💰 Costs: {event_log.cost_tracker.get_summary()}")
+            print(f"📝 Events: {event_log.get_summary()}")
+            if hasattr(agency, '_revenue_tracker') and agency._revenue_tracker:
+                print(f"💰 Revenue: ${agency._revenue_tracker.get_total_revenue():.2f}")
+            if hasattr(agency, '_model_router') and agency._model_router:
+                print(f"🔀 Model routing: {agency._model_router.get_stats()}")
+            continue
+
+        if task.lower() == "memory":
+            recent = agency.memory.search_keyword("", limit=10)
+            for entry in recent:
+                print(f"  💾 [{entry.get('key')}]: {str(entry.get('value'))[:80]}")
+            continue
+
+        # Create trace for this request
+        trace = TraceContext()
+        for team in agency.teams.values():
+            all_agents = list(team.agents)
+            if team.lead:
+                all_agents.append(team.lead)
+            for agent in all_agents:
+                agent.set_trace_context(trace)
+
+        # Use planner for complex tasks
+        if task.lower().startswith("plan:") or task.count('.') > 1 or len(task) > 200:
+            actual_task = task[5:].strip() if task.lower().startswith("plan:") else task
+            print("📐 Planning and executing...")
+            result = await agency.execute(actual_task, use_planner=True)
+        else:
+            result = await agency.execute(task)
+
+        print(f"\n✅ Result (success={result.success}):\n{result.output}\n")
+
+        # Auto-track revenue and failure outcomes
+        if result.success:
+            if hasattr(agency, '_revenue_tracker') and agency._revenue_tracker:
+                agency._revenue_tracker.record_task_completion("agency")
+            if hasattr(agency, '_failure_predictor') and agency._failure_predictor:
+                agency._failure_predictor.record_outcome("agency", True)
+        else:
+            if hasattr(agency, '_failure_predictor') and agency._failure_predictor:
+                agency._failure_predictor.record_outcome("agency", False)
+
+        trace_events = event_log.get_trace(trace.trace_id)
+        if trace_events:
+            print(f"📊 Trace: {len(trace_events)} events | 💰 Cost: ${event_log.cost_tracker.total_cost_usd:.4f}")
+
+    # Print final summary on exit
+    print(f"\n{'='*50}")
+    print(f"📊 Session Summary")
+    summary = event_log.get_summary()
+    print(f"   Total events: {summary['total_events']}")
+    print(f"   LLM calls: {summary['event_types'].get('llm_response', 0)}")
+    print(f"   Tool uses: {summary['event_types'].get('tool_result', 0)}")
+    costs = summary['costs']
+    print(f"   Total tokens: {costs['total_tokens']:,}")
+    print(f"   Total cost: ${costs['total_cost_usd']:.4f}")
+    print(f"   Per agent: {json.dumps(costs['per_agent'], indent=2) if costs['per_agent'] else 'N/A'}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

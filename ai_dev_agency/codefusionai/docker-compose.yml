@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  codefusionai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - FORGE_MODEL=${FORGE_MODEL:-gpt-4}
+      - GITHUB_API_KEY=${GITHUB_API_KEY:-}
+      - BITBUCKET_API_KEY=${BITBUCKET_API_KEY:-}
+      - JIRA_API_KEY=${JIRA_API_KEY:-}
+      - SLACK_API_KEY=${SLACK_API_KEY:-}
+      - TEAMS_API_KEY=${TEAMS_API_KEY:-}
+      - GOOGLE_CLOUD_API_KEY=${GOOGLE_CLOUD_API_KEY:-}
+      - AWS_API_KEY=${AWS_API_KEY:-}
+      - AZURE_API_KEY=${AZURE_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Forge
+COPY pyproject.toml README.md ./
+COPY forge/ forge/
+RUN pip install --no-cache-dir -e .
+
+# Generate a demo agency from the SaaS Support pack
+RUN forge create --pack saas_support --output /app/demo --overwrite
+
+# Copy the runtime into the generated agency
+COPY forge/runtime/ /app/demo/saas-support-pro/forge/runtime/
+
+# Set working directory to the generated agency
+WORKDIR /app/demo/saas-support-pro
+
+# Install agency dependencies
+RUN pip install --no-cache-dir openai pydantic fastapi uvicorn rich
+
+EXPOSE 8000
+
+CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "8000"]

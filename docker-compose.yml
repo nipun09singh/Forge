@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  # Forge demo agency — generated from SaaS Support pack
+  forge-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile.demo
+    ports:
+      - "${DEMO_PORT:-8000}:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - FORGE_MODEL=${FORGE_MODEL:-gpt-4}
+      - FORGE_LOG_LEVEL=${FORGE_LOG_LEVEL:-INFO}
+      - FORGE_JSON_LOGS=true
+    volumes:
+      - demo-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  demo-data:
