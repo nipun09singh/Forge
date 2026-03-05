@@ -569,6 +569,17 @@ async def orchestrate_build(request: OrchestrateBuildRequest):
     """Build a complete project using the intelligent orchestrator (recommended over /api/project)."""
     if not _agency:
         raise HTTPException(status_code=503, detail="Agency not initialized")
+    
+    # Validate workdir is within allowed workspace
+    import os
+    from pathlib import Path
+    allowed_base = Path("./workspace").resolve()
+    requested = Path(request.workdir).resolve()
+    try:
+        requested.relative_to(allowed_base)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="workdir must be within ./workspace/ directory")
+    
     result = await _agency.orchestrate(task=request.task, workdir=request.workdir)
     return result
 

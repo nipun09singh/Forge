@@ -65,8 +65,17 @@ class Agency:
         self.stress_lab = StressLab(agency=self)
         self.orchestrator = OrchestratorAgent(model=model)
 
-        # Strategic plannerfor complex task decomposition
+        # Strategic planner for complex task decomposition
         self.planner = Planner(model=model)
+
+        # Performance tracking — wires the self-improvement loop
+        try:
+            from forge.runtime.improvement import PerformanceTracker, QualityGate
+            self._performance_tracker = PerformanceTracker()
+            self._quality_gate = QualityGate()
+        except ImportError:
+            self._performance_tracker = None
+            self._quality_gate = None
 
         self.max_concurrent_tasks: int = 0
         self._checkpoint_store: CheckpointStore | None = None
@@ -82,6 +91,21 @@ class Agency:
         self._llm_client = AsyncOpenAI(**client_kwargs)
         self.planner.set_llm_client(self._llm_client)
         self.orchestrator.set_llm_client(self._llm_client)
+
+        # Wire self-improvement infrastructure
+        if self._performance_tracker:
+            try:
+                self.self_evolution.set_infrastructure(
+                    tracker=self._performance_tracker,
+                    memory=self.memory,
+                    llm_client=self._llm_client,
+                )
+                self.agent_spawner.set_infrastructure(
+                    tracker=self._performance_tracker,
+                    llm_client=self._llm_client,
+                )
+            except Exception:
+                pass  # Self-improvement is optional
 
     def add_team(self, team: Team) -> None:
         """Add a team to the agency."""
@@ -111,6 +135,9 @@ class Agency:
                 if not agent.tool_registry.list_tools():
                     for tool in builtin:
                         agent.tool_registry.register(tool)
+                # Wire performance tracking for self-improvement
+                if self._performance_tracker and hasattr(agent, 'set_performance_tracker'):
+                    agent.set_performance_tracker(self._performance_tracker)
         except ImportError:
             pass
 

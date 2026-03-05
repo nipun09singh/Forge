@@ -269,6 +269,12 @@ class OrchestratorAgent:
                                 output = await tool.run(**args)
                                 logger.info(f"  🔧 {fn_name}: {str(output)[:80]}")
 
+                                # Track files created during the loop (not just at end)
+                                if fn_name == "read_write_file" and "path" in args:
+                                    rel = os.path.relpath(args["path"], str(project_dir))
+                                    if rel not in files_created and not rel.startswith(".."):
+                                        files_created.append(rel)
+
                                 conversation.append({
                                     "role": "tool",
                                     "content": str(output)[:5000],
@@ -294,8 +300,16 @@ class OrchestratorAgent:
                 text_output = choice.message.content or ""
                 conversation.append({"role": "assistant", "content": text_output})
 
-                # Check if agent says it's done
-                if "DONE" in text_output.upper() or "project is complete" in text_output.lower():
+                # Check if agent says it's done — require "DONE" as a standalone declaration
+                done_signals = [
+                    text_output.strip().upper().startswith("DONE"),
+                    text_output.strip().upper().endswith("DONE"),
+                    "PROJECT IS COMPLETE" in text_output.upper(),
+                    "\nDONE\n" in f"\n{text_output}\n",
+                    text_output.strip().upper() == "DONE",
+                    "DONE." == text_output.strip().upper()[:5] if len(text_output.strip()) <= 200 else False,
+                ]
+                if any(done_signals) and len(files_created) >= 1:
                     project_complete = True
                     logger.info(f"  ✅ Agent declares project complete")
                     break
