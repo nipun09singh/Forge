@@ -85,6 +85,14 @@ except ImportError:
     ScopeGuard = None
 
 try:
+    from forge.runtime.inbound import InboundProcessor
+    from forge.runtime.self_evolution import SelfEvolution
+    from forge.runtime.agent_spawner import AgentSpawner
+    _has_autonomous = True
+except ImportError:
+    _has_autonomous = False
+
+try:
     from forge.runtime.logging_config import setup_logging
     setup_logging(level=os.getenv("FORGE_LOG_LEVEL", "INFO"), json_format=os.getenv("FORGE_JSON_LOGS", "").lower() == "true")
 except ImportError:
@@ -335,6 +343,20 @@ def build_agency() -> tuple[Agency, EventLog]:
     agency._negotiation_engine = negotiation_engine
     agency._ab_test_manager = ab_test_manager
 
+    # ─── Level 3-5: Autonomous Operation ───────────────────
+    if _has_autonomous:
+        agency.inbound.poll_interval = 30.0
+        agency.self_evolution.set_infrastructure(
+            tracker=performance_tracker,
+            memory=memory,
+            llm_client=agency._llm_client,
+        )
+        agency.agent_spawner.set_infrastructure(
+            tracker=performance_tracker,
+            llm_client=agency._llm_client,
+        )
+        logger.info("Level 3-5 autonomous systems initialized")
+
     # ═══════════════════════════════════════════════════════════
     # Seed initial data so APIs aren't empty on Day 1
     # ═══════════════════════════════════════════════════════════
@@ -364,7 +386,10 @@ async def main():
     print(f"   📡 Observability: Event logging + cost tracking")
     print(f"   📐 Planner: Enabled")
     print(f"   ✅ Quality gates: Active (threshold 80%)")
-    print(f"\n   Type a task, 'plan: <task>' for complex tasks, or 'quit' to exit.\n")
+    print(f"\n   Type a task, 'build: <task>' to build a project (recommended), or 'quit' to exit.")
+    print(f"   Also: 'project: <task>' (legacy), 'plan: <task>' for planning.")
+    print(f"   Type 'stress: <domain>' to run stress test with infinite improvement.")
+    print(f"   Type 'autonomous' for 24/7 mode, 'evolve' for self-improvement, 'spawn' to detect gaps.\n")
 
     while True:
         try:
@@ -374,6 +399,59 @@ async def main():
         if task.lower() in ("quit", "exit", "q"):
             break
         if not task.strip():
+            continue
+
+        if task.lower().startswith("stress:"):
+            domain = task[7:].strip() or "{{ domain | default('general') }}"
+            print(f"🧪 Starting Stress Lab for '{domain}'...")
+            reports = await agency.stress_lab.run_full_cycle(
+                domain=domain,
+                scenarios_per_round=10,
+                target_pass_rate=0.90,
+                max_cycles=3,
+            )
+            if reports:
+                print(f"\n📊 Stress Lab Results:")
+                for r in reports:
+                    print(f"  Cycle {r.cycle}: {r.pass_rate:.0%} pass rate, {r.evolutions_applied} evolutions, {r.agents_spawned} spawns")
+                print(f"\n  Improvement: {reports[0].pass_rate:.0%} → {reports[-1].pass_rate:.0%}")
+            continue
+
+        if task.lower() == "autonomous":
+            print("🤖 Starting autonomous mode (24/7 operation)...")
+            print("   Watching: API queue + ./inbox/ for file drops")
+            print("   Press Ctrl+C to stop")
+            await agency.inbound.start()
+            try:
+                while True:
+                    await asyncio.sleep(60)
+            except KeyboardInterrupt:
+                await agency.inbound.stop()
+                print("Autonomous mode stopped.")
+            continue
+
+        if task.lower() == "evolve":
+            print("🧬 Running evolution cycle...")
+            agent_map = {}
+            for team in agency.teams.values():
+                if team.lead:
+                    agent_map[team.lead.name] = team.lead
+                for a in team.agents:
+                    agent_map[a.name] = a
+            records = await agency.self_evolution.run_evolution_cycle(agent_map)
+            print(f"   {len(records)} improvements applied")
+            for r in records:
+                print(f"   🧬 {r.target_agent}: {r.description[:60]}")
+            continue
+
+        if task.lower() == "spawn":
+            print("🥚 Checking for agent gaps...")
+            spawned = await agency.agent_spawner.check_and_spawn(agency)
+            if spawned:
+                for s in spawned:
+                    print(f"   🆕 Spawned: {s.name} ({s.role}) — {s.reason}")
+            else:
+                print("   No gaps detected. All good!")
             continue
 
         if task.lower() == "status":
@@ -400,6 +478,43 @@ async def main():
                 all_agents.append(team.lead)
             for agent in all_agents:
                 agent.set_trace_context(trace)
+
+        # Build mode: single intelligent orchestrator loop (recommended)
+        if task.lower().startswith("build:"):
+            build_task = task[6:].strip()
+            print("🏗️  Orchestrator building project (single intelligent loop)...")
+            print("   This uses one agent with all tools — the correct architecture.")
+            print("")
+            result = await agency.orchestrate(build_task)
+            print(f"\n{'='*50}")
+            print(f"📦 {'COMPLETE' if result['success'] else 'PARTIAL'}")
+            print(f"   Iterations: {result['iterations']}")
+            print(f"   Files: {len(result['files_created'])}")
+            print(f"   Duration: {result['duration_seconds']:.0f}s")
+            if result['files_created']:
+                print(f"\n   Files created:")
+                for f in result['files_created']:
+                    print(f"     📄 {f}")
+            print(f"{'='*50}\n")
+            continue
+
+        # Project mode: multi-file, multi-agent project execution (legacy)
+        if task.lower().startswith("project:"):
+            project_task = task[8:].strip()
+            print("🏗️  Building project (multi-file, multi-agent)...")
+            print("   This may take several minutes...")
+            project_result = await agency.execute_project(project_task)
+            print(f"\n{'='*50}")
+            print(f"📦 Project {'COMPLETE' if project_result['success'] else 'PARTIAL'}")
+            print(f"   Steps: {project_result['steps_completed']}/{project_result['steps_total']}")
+            print(f"   Files: {len(project_result['files_created'])}")
+            print(f"   Duration: {project_result['duration_seconds']:.0f}s")
+            print(f"   Cost: ${project_result['cost_usd']:.4f}")
+            print(f"\n   Files created:")
+            for f in project_result['files_created']:
+                print(f"     📄 {f}")
+            print(f"{'='*50}\n")
+            continue
 
         # Use planner for complex tasks
         if task.lower().startswith("plan:") or task.count('.') > 1 or len(task) > 200:

@@ -18,6 +18,12 @@ from forge.runtime.messages import AgentMessage, MessageType, MessageBus
 from forge.runtime.checkpointing import CheckpointStore
 from forge.runtime.scheduler import Scheduler, TaskSchedule
 from forge.runtime.workspace import WorkspaceManager
+from forge.runtime.project_executor import ProjectExecutor, ProjectResult
+from forge.runtime.inbound import InboundProcessor
+from forge.runtime.self_evolution import SelfEvolution
+from forge.runtime.agent_spawner import AgentSpawner
+from forge.runtime.stress_lab import StressLab
+from forge.runtime.orchestrator import OrchestratorAgent
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +58,14 @@ class Agency:
         self.message_bus = MessageBus()
         self.scheduler = Scheduler(execute_fn=self.execute)
         self.workspace_manager = WorkspaceManager(base_dir="./workspace")
+        self.inbound = InboundProcessor(execute_fn=self.execute)
+        self.self_evolution = SelfEvolution()
+        self.agent_spawner = AgentSpawner()
+        self.project_executor = ProjectExecutor()
+        self.stress_lab = StressLab(agency=self)
+        self.orchestrator = OrchestratorAgent(model=model)
 
-        # Strategic planner for complex task decomposition
+        # Strategic plannerfor complex task decomposition
         self.planner = Planner(model=model)
 
         self.max_concurrent_tasks: int = 0
@@ -69,6 +81,7 @@ class Agency:
             client_kwargs["api_key"] = "not-set"  # Placeholder — will fail on actual LLM call, not on init
         self._llm_client = AsyncOpenAI(**client_kwargs)
         self.planner.set_llm_client(self._llm_client)
+        self.orchestrator.set_llm_client(self._llm_client)
 
     def add_team(self, team: Team) -> None:
         """Add a team to the agency."""
@@ -86,6 +99,20 @@ class Agency:
             agent.set_llm_client(self._llm_client)
             agent.set_memory(self.memory)
             self.router.register_agent(agent, team=team.name)
+
+        # Ensure all agents have primitive tools for real execution
+        try:
+            from forge.runtime.integrations import BuiltinToolkit
+            builtin = BuiltinToolkit.all_tools()
+            all_agents = list(team.agents)
+            if team.lead:
+                all_agents.append(team.lead)
+            for agent in all_agents:
+                if not agent.tool_registry.list_tools():
+                    for tool in builtin:
+                        agent.tool_registry.register(tool)
+        except ImportError:
+            pass
 
         # Keep planner aware of all teams
         self.planner.set_teams(self.teams)
@@ -165,6 +192,47 @@ class Agency:
                 context=t.get("context"),
             ))
         return await asyncio.gather(*coros, return_exceptions=True)
+
+    async def execute_project(self, task: str, workdir: str = "./workspace/project") -> dict[str, Any]:
+        """
+        Execute a complex project — plans, builds multi-file output, tests, commits.
+        
+        This is "project mode" — for tasks that require multiple files,
+        builds, tests, and iterative debugging. Uses the full agent team.
+        """
+        result = await self.project_executor.execute_project(
+            task=task,
+            agency=self,
+            workdir=workdir,
+        )
+        return {
+            "success": result.success,
+            "project_dir": result.project_dir,
+            "files_created": result.files_created,
+            "steps_completed": result.steps_completed,
+            "steps_total": result.steps_total,
+            "duration_seconds": result.total_duration_seconds,
+            "cost_usd": result.total_cost_usd,
+            "summary": result.summary,
+        }
+
+    async def orchestrate(self, task: str, workdir: str = "./workspace/project") -> dict[str, Any]:
+        """
+        Build a complete project using the OrchestratorAgent.
+        
+        This is the CORRECT way to build projects — one intelligent agent loop
+        with all tools, not a multi-agent pipeline.
+        """
+        self.orchestrator.set_llm_client(self._llm_client)
+        result = await self.orchestrator.build(task=task, workdir=workdir)
+        return {
+            "success": result.success,
+            "project_dir": result.project_dir,
+            "files_created": result.files_created,
+            "iterations": result.iterations,
+            "duration_seconds": result.duration_seconds,
+            "summary": result.summary,
+        }
 
     async def plan(self, task: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
         """Plan a complex task using the strategic planner."""

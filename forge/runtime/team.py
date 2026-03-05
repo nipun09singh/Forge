@@ -100,6 +100,14 @@ class Team:
             agent = next((a for a in self.agents if a.name == agent_name), None)
             if not agent:
                 return f"Agent '{agent_name}' not found in team."
+            # Ensure agent has primitive tools for real execution
+            if not agent.tool_registry.list_tools():
+                try:
+                    from forge.runtime.integrations import BuiltinToolkit
+                    for tool in BuiltinToolkit.all_tools():
+                        agent.tool_registry.register(tool)
+                except ImportError:
+                    pass
             result = await agent.execute(subtask, context)
             tt = TeamTask(description=subtask, assigned_to=agent_name, status="done", result=result)
             self._task_log.append(tt)
@@ -144,6 +152,16 @@ class Team:
 
     async def _parallel_execution(self, task: str, context: dict[str, Any] | None) -> TaskResult:
         """All agents work on the task independently in parallel."""
+        # Ensure all agents have tools
+        try:
+            from forge.runtime.integrations import BuiltinToolkit
+            builtin = BuiltinToolkit.all_tools()
+            for agent in self.agents:
+                if not agent.tool_registry.list_tools():
+                    for tool in builtin:
+                        agent.tool_registry.register(tool)
+        except ImportError:
+            pass
         coros = [agent.execute(task, context) for agent in self.agents]
         results = await asyncio.gather(*coros, return_exceptions=True)
 

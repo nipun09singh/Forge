@@ -8,6 +8,7 @@ from forge.runtime.integrations.webhook_tool import create_webhook_tool
 from forge.runtime.integrations.command_tool import create_command_tool
 from forge.runtime.integrations.git_tool import create_git_tool
 from forge.runtime.integrations.browser_tool import create_browser_tool
+from forge.runtime.integrations.search_tool import create_search_tool
 from forge.runtime.tools import Tool
 
 
@@ -37,9 +38,10 @@ class BuiltinToolkit:
         tools.append(create_command_tool(sandbox_dir))
         tools.append(create_git_tool())
         tools.append(create_browser_tool())
+        tools.append(create_search_tool())
         return tools
 
     @staticmethod
     def get_tool_names() -> list[str]:
         """Get names of all available built-in tools."""
-        return ["http_request", "send_email", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web"]
+        return ["http_request", "send_email", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web", "web_search"]

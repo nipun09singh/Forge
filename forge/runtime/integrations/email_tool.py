@@ -29,7 +29,7 @@ async def send_email(to: str, subject: str, body: str, html: str = "") -> str:
         if html:
             msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15) if smtp_port == 465 else smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
             if smtp_port == 587:
                 server.starttls()
             if smtp_user and smtp_pass:

@@ -81,7 +81,7 @@ class CheckpointStore:
     def load_latest(self, entity_type: str, entity_name: str) -> dict[str, Any] | None:
         """Load the most recent checkpoint for an entity."""
         row = self._conn.execute(
-            "SELECT * FROM checkpoints WHERE entity_type = ? AND entity_name = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM checkpoints WHERE entity_type = ? AND entity_name = ? ORDER BY rowid DESC LIMIT 1",
             (entity_type, entity_name),
         ).fetchone()
         if not row:

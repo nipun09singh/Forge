@@ -23,6 +23,7 @@ BUILTIN_TOOL_MAP = {
     "run_command": "from forge.runtime.integrations.command_tool import create_command_tool\n\n{name}_tool = create_command_tool()",
     "git_operation": "from forge.runtime.integrations.git_tool import create_git_tool\n\n{name}_tool = create_git_tool()",
     "browse_web": "from forge.runtime.integrations.browser_tool import create_browser_tool\n\n{name}_tool = create_browser_tool()",
+    "web_search": "from forge.runtime.integrations.search_tool import create_search_tool\n\n{name}_tool = create_search_tool()",
 }
 
 # Exact matching: known aliases → built-in tools
@@ -52,8 +53,10 @@ BUILTIN_PATTERN_MAP = {
     "browse_web": "browse_web",
     "browse_url": "browse_web",
     "fetch_webpage": "browse_web",
-    "web_search": "browse_web",
+    "web_search": "web_search",
     "read_url": "browse_web",
+    "search_web": "web_search",
+    "internet_search": "web_search",
 }
 
 
@@ -75,64 +78,78 @@ class ToolGenerator:
             return BUILTIN_PATTERN_MAP[name]
         return None
 
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        """Sanitize a blueprint name for use as a Python identifier and filename."""
+        import re
+        # Strip anything that's not alphanumeric or underscore
+        safe = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        safe = re.sub(r'_+', '_', safe).strip('_')
+        if not safe or not safe[0].isalpha():
+            safe = "tool_" + safe
+        return safe
+
     def generate(self, blueprint: ToolBlueprint, output_dir: Path) -> Path:
         """Generate a tool module file. Uses built-in integration if available."""
         builtin = self._detect_builtin(blueprint.name)
 
+        # Sanitize name for safe code generation
+        safe_name = self._sanitize_name(blueprint.name)
+        # Sanitize description — escape quotes for use in f-strings
+        safe_desc = blueprint.description.replace('"', '\\"').replace('\n', ' ')[:200]
+
         if builtin and builtin in BUILTIN_TOOL_MAP:
             # Generate a module that imports from built-in integrations
             content = (
-                f'"""Tool: {blueprint.name} — powered by Forge built-in integration."""\n\n'
-                f'{BUILTIN_TOOL_MAP[builtin].format(name=blueprint.name)}\n'
+                f'"""Tool: {safe_name} — powered by Forge built-in integration."""\n\n'
+                f'{BUILTIN_TOOL_MAP[builtin].format(name=safe_name)}\n'
             )
             logger.info(f"Using built-in integration for tool: {blueprint.name} → {builtin}")
         else:
             # Domain-specific tool: generate a thin wrapper that describes the task
-            # The agent's ReAct loop will use primitive tools (run_command, read_write_file, etc.)
-            # to actually accomplish the work
             content = (
-                f'"""Domain tool: {blueprint.name}\n\n'
-                f'{blueprint.description}\n'
+                f'"""Domain tool: {safe_name}\n\n'
+                f'{safe_desc}\n'
                 f'"""\n\n'
                 f'from forge.runtime.tools import Tool, ToolParameter\n\n\n'
-                f'async def {blueprint.name}('
-                + ', '.join(p.get("name", "arg") for p in blueprint.parameters)
+                f'async def {safe_name}('
+                + ', '.join(self._sanitize_name(p.get("name", "arg")) for p in blueprint.parameters)
                 + ') -> str:\n'
-                f'    """{blueprint.description}"""\n'
-                f'    # This tool provides context to the agent.\n'
-                f'    # The agent will use primitive tools (run_command, read_write_file, http_request)\n'
-                f'    # to actually execute the task described here.\n'
+                f'    """{safe_desc}"""\n'
                 f'    task_context = (\n'
-                f'        "Task: {blueprint.description}\\n"\n'
+                f'        "Task: {safe_desc}\\n"\n'
             )
             for p in blueprint.parameters:
-                pname = p.get("name", "arg")
+                pname = self._sanitize_name(p.get("name", "arg"))
                 content += f'        f"  {pname}: {{{pname}}}\\n"\n'
             content += (
                 f'        "\\nUse your available tools (run_command, read_write_file, http_request, "\\n'
                 f'        "query_database) to accomplish this task. Create real files and run real commands."\n'
                 f'    )\n'
                 f'    return task_context\n\n\n'
-                f'{blueprint.name}_tool = Tool(\n'
-                f'    name="{blueprint.name}",\n'
-                f'    description="{blueprint.description}",\n'
+                f'{safe_name}_tool = Tool(\n'
+                f'    name="{safe_name}",\n'
+                f'    description="{safe_desc}",\n'
                 f'    parameters=[\n'
             )
             for p in blueprint.parameters:
+                pn = self._sanitize_name(p.get("name", "arg"))
+                pt = p.get("type", "string")
+                pd = p.get("description", p.get("name", "")).replace('"', '\\"')[:100]
                 content += (
-                    f'        ToolParameter(name="{p.get("name", "arg")}", '
-                    f'type="{p.get("type", "string")}", '
-                    f'description="{p.get("description", p.get("name", ""))}", '
+                    f'        ToolParameter(name="{pn}", '
+                    f'type="{pt}", '
+                    f'description="{pd}", '
                     f'required={p.get("required", True)}),\n'
                 )
             content += (
                 f'    ],\n'
-                f'    _fn={blueprint.name},\n'
+                f'    _fn={safe_name},\n'
                 f')\n'
             )
-            logger.info(f"Generated domain tool (agent-driven): {blueprint.name}")
+            logger.info(f"Generated domain tool (agent-driven): {safe_name}")
 
-        output_path = output_dir / f"tool_{blueprint.name}.py"
+        output_path = output_dir / f"tool_{self._sanitize_name(blueprint.name)}.py"
         output_path.write_text(content, encoding="utf-8")
         return output_path
 

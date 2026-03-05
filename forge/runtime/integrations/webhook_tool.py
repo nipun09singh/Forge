@@ -11,6 +11,21 @@ from forge.runtime.tools import Tool, ToolParameter
 
 async def send_webhook(url: str, payload: str, method: str = "POST") -> str:
     """Send a webhook (HTTP POST/PUT with JSON payload) to an external URL."""
+    # SSRF protection: reuse http_tool's URL validation
+    try:
+        from forge.runtime.integrations.http_tool import _is_url_safe
+        safe, reason = _is_url_safe(url)
+        if not safe:
+            return json.dumps({"success": False, "error": f"BLOCKED: {reason}"})
+    except ImportError:
+        pass  # If http_tool not available, proceed without check
+
+    # Validate payload is valid JSON
+    try:
+        json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return json.dumps({"success": False, "error": "Payload must be valid JSON"})
+
     try:
         data = payload.encode("utf-8")
         headers = {"Content-Type": "application/json", "User-Agent": "Forge-Agency/1.0"}

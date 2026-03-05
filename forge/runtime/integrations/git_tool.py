@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 from typing import Any
 
 from forge.runtime.tools import Tool, ToolParameter
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_git_args(args: str) -> str:
+    """Sanitize git arguments to prevent shell injection."""
+    if not args:
+        return ""
+    # Block shell metacharacters that could be used for injection
+    dangerous = [";", "&&", "||", "`", "$(", "${", "|", ">", "<", "\n", "\r"]
+    for ch in dangerous:
+        if ch in args:
+            return args.replace(ch, "")
+    return args
 
 
 async def git_operation(operation: str, args: str = "", workdir: str = ".") -> str:
@@ -17,22 +30,26 @@ async def git_operation(operation: str, args: str = "", workdir: str = ".") -> s
 
     # Map operations to git commands
     op = operation.lower().strip()
+    safe_args = _sanitize_git_args(args)
+    
+    # Use shlex.quote for arguments interpolated into shell commands
+    quoted_args = shlex.quote(safe_args) if safe_args else ""
     
     command_map = {
         "init": "git init",
         "status": "git status",
-        "add": f"git add {args}" if args else "git add .",
-        "commit": f'git commit -m "{args}"' if args else 'git commit -m "Auto-commit by agent"',
-        "branch": f"git branch {args}" if args else "git branch",
-        "checkout": f"git checkout {args}",
-        "diff": f"git diff {args}" if args else "git diff",
-        "log": f"git log --oneline -20 {args}".strip(),
-        "push": f"git push {args}" if args else "git push",
-        "pull": f"git pull {args}" if args else "git pull",
-        "clone": f"git clone {args}",
-        "stash": f"git stash {args}" if args else "git stash",
-        "reset": f"git reset {args}" if args else "git reset",
-        "merge": f"git merge {args}",
+        "add": f"git add {quoted_args}" if safe_args else "git add .",
+        "commit": f"git commit -m {quoted_args}" if safe_args else 'git commit -m "Auto-commit by agent"',
+        "branch": f"git branch {quoted_args}" if safe_args else "git branch",
+        "checkout": f"git checkout {quoted_args}",
+        "diff": f"git diff {quoted_args}" if safe_args else "git diff",
+        "log": f"git log --oneline -20 {quoted_args}".strip(),
+        "push": f"git push {quoted_args}" if safe_args else "git push",
+        "pull": f"git pull {quoted_args}" if safe_args else "git pull",
+        "clone": f"git clone {quoted_args}",
+        "stash": f"git stash {quoted_args}" if safe_args else "git stash",
+        "reset": f"git reset {quoted_args}" if safe_args else "git reset",
+        "merge": f"git merge {quoted_args}",
     }
 
     if op not in command_map:

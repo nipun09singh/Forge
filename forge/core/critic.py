@@ -247,6 +247,8 @@ class RefinementLoop:
         """
         current_blueprint = blueprint
         previous_critique: CritiqueResult | None = None
+        # Reset history for this refinement run
+        self._history = []
 
         for iteration in range(self.max_iterations):
             logger.info(f"=== Refinement Iteration {iteration + 1}/{self.max_iterations} ===")

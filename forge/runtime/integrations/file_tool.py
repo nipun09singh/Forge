@@ -18,7 +18,9 @@ async def read_write_file(action: str, path: str, content: str = "") -> str:
 
     # Security: resolve and check path is within sandbox
     target = (sandbox / path).resolve()
-    if not str(target).startswith(str(sandbox)):
+    try:
+        target.relative_to(sandbox)
+    except ValueError:
         return json.dumps({"error": "Access denied: path is outside sandbox directory."})
 
     try:

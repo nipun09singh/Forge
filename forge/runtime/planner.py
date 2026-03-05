@@ -80,7 +80,7 @@ class TaskPlan:
         return len(self.completed_steps) / len(self.steps)
 
     def get_ready_steps(self) -> list[PlanStep]:
-        """Get steps whose dependencies are all satisfied."""
+        """Get steps whose dependencies are all satisfied. Does NOT mutate step status."""
         completed_ids = {s.id for s in self.completed_steps}
         ready = []
         for step in self.steps:
@@ -88,9 +88,12 @@ class TaskPlan:
                 continue
             deps_met = all(dep in completed_ids for dep in step.depends_on)
             if deps_met:
-                step.status = StepStatus.READY
                 ready.append(step)
         return ready
+
+    def mark_ready(self, step: PlanStep) -> None:
+        """Mark a step as ready for execution."""
+        step.status = StepStatus.READY
 
     def get_step(self, step_id: str) -> PlanStep | None:
         """Get a step by ID."""

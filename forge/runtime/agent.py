@@ -217,10 +217,17 @@ class Agent:
                         self.conversation.append({"role": "tool", "content": result["output"], "tool_call_id": result["id"]})
                     # Prune conversation to prevent context overflow
                     if len(self.conversation) > self.max_conversation_history:
-                        # Keep system prompt + last N messages
+                        # Keep system prompt + last N messages, but don't orphan tool messages
                         system = [m for m in self.conversation if m.get("role") == "system"]
-                        recent = self.conversation[-(self.max_conversation_history - len(system)):]
-                        self.conversation = system + recent
+                        rest = [m for m in self.conversation if m.get("role") != "system"]
+                        keep_count = self.max_conversation_history - len(system)
+                        if len(rest) > keep_count:
+                            cut_idx = len(rest) - keep_count
+                            # Don't cut in the middle of a tool response sequence
+                            while cut_idx < len(rest) and rest[cut_idx].get("role") == "tool":
+                                cut_idx += 1
+                            rest = rest[cut_idx:]
+                        self.conversation = system + rest
                     continue
 
                 # No tool calls — agent is done

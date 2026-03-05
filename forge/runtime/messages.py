@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class MessageType(str, Enum):
@@ -103,13 +106,19 @@ class MessageBus:
         # Notify direct receiver
         if message.receiver and message.receiver in self._subscribers:
             for callback in self._subscribers[message.receiver]:
-                callback(message)
+                try:
+                    callback(message)
+                except Exception as e:
+                    logger.error(f"Message callback error for {message.receiver}: {e}")
 
         # Notify broadcast subscribers (empty receiver = broadcast)
         if not message.receiver:
             for name, callbacks in self._subscribers.items():
                 for callback in callbacks:
-                    callback(message)
+                    try:
+                        callback(message)
+                    except Exception as e:
+                        logger.error(f"Broadcast callback error for {name}: {e}")
 
     def subscribe(self, agent_name: str, callback) -> None:
         """Subscribe an agent to receive messages."""

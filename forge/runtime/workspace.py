@@ -28,9 +28,15 @@ class Workspace:
         self._files_created: list[str] = []
 
     def get_path(self, relative: str = "") -> str:
-        """Get absolute path within this workspace."""
+        """Get absolute path within this workspace. Validates path stays inside workspace."""
         if relative:
-            return str(self.path / relative)
+            target = (self.path / relative).resolve()
+            # Security: ensure path stays within workspace
+            try:
+                target.relative_to(self.path)
+            except ValueError:
+                raise ValueError(f"Path traversal blocked: '{relative}' escapes workspace")
+            return str(target)
         return str(self.path)
 
     def list_files(self) -> list[dict[str, Any]]:

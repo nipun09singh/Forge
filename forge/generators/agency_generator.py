@@ -166,7 +166,7 @@ def test_agency():
     try:
         import importlib
         spec = importlib.util.find_spec("api_server")
-        check("API server importable", spec is not None or True)  # May not be on path
+        check("API server importable", spec is not None)
     except Exception:
         check("API server importable", True)  # Best effort
 

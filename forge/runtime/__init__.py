@@ -25,6 +25,12 @@ from forge.runtime.failure_predictor import FailurePredictor, FailurePrediction
 from forge.runtime.workspace import Workspace, WorkspaceManager
 from forge.runtime.knowledge import DomainKnowledge, get_domain_knowledge
 from forge.runtime.build_loop import BuildLoop, BuildResult
+from forge.runtime.project_executor import ProjectExecutor, ProjectResult
+from forge.runtime.self_evolution import SelfEvolution, EvolutionRecord
+from forge.runtime.inbound import InboundProcessor, InboundItem, FileDropChannel, APIQueueChannel
+from forge.runtime.agent_spawner import AgentSpawner, SpawnedAgent
+from forge.runtime.stress_lab import StressLab, Scenario, CycleReport
+from forge.runtime.orchestrator import OrchestratorAgent, OrchestratorResult
 
 __all__ = [
     "Agent",
@@ -99,4 +105,19 @@ __all__ = [
     "get_domain_knowledge",
     "BuildLoop",
     "BuildResult",
+    "ProjectExecutor",
+    "ProjectResult",
+    "AgentSpawner",
+    "SpawnedAgent",
+    "SelfEvolution",
+    "EvolutionRecord",
+    "InboundProcessor",
+    "InboundItem",
+    "FileDropChannel",
+    "APIQueueChannel",
+    "StressLab",
+    "Scenario",
+    "CycleReport",
+    "OrchestratorAgent",
+    "OrchestratorResult",
 ]

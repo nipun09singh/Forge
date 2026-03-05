@@ -60,14 +60,27 @@ async def browse_web(url: str, extract: str = "text") -> str:
         url: The URL to browse
         extract: What to extract: "text" (page text), "links" (all links), "raw" (raw HTML)
     """
+    # SSRF protection: reuse http_tool's URL validation
     try:
+        from forge.runtime.integrations.http_tool import _is_url_safe
+        safe, reason = _is_url_safe(url)
+        if not safe:
+            return json.dumps({"url": url, "error": f"BLOCKED: {reason}"})
+    except ImportError:
+        pass  # If http_tool not available, proceed without check
+
+    try:
+        import http.cookiejar
+        cj = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
         headers = {
-            "User-Agent": "Mozilla/5.0 (Forge AI Agent) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
         req = urllib.request.Request(url, headers=headers)
         
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with opener.open(req, timeout=15) as response:
             content_type = response.headers.get("Content-Type", "")
             charset = "utf-8"
             if "charset=" in content_type:
@@ -81,8 +94,8 @@ async def browse_web(url: str, extract: str = "text") -> str:
                 "url": url,
                 "status": status,
                 "content_type": content_type,
-                "html": raw_html[:10000],
-                "truncated": len(raw_html) > 10000,
+                "html": raw_html[:20000],
+                "truncated": len(raw_html) > 20000,
             })
         
         # Parse HTML
@@ -107,9 +120,9 @@ async def browse_web(url: str, extract: str = "text") -> str:
         return json.dumps({
             "url": url,
             "status": status,
-            "text": text[:8000],
+            "text": text[:15000],
             "links": parser.get_links()[:20],
-            "truncated": len(text) > 8000,
+            "truncated": len(text) > 15000,
         })
         
     except urllib.error.HTTPError as e:

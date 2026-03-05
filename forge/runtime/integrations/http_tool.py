@@ -2,15 +2,53 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 from typing import Any
 from forge.runtime.tools import Tool, ToolParameter
+
+
+def _is_url_safe(url: str) -> tuple[bool, str]:
+    """Check if URL targets a safe (non-internal) destination."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        
+        # Block non-HTTP schemes
+        if parsed.scheme not in ("http", "https"):
+            return False, f"Only http/https URLs are allowed, got: {parsed.scheme}"
+        
+        hostname = parsed.hostname or ""
+        
+        # Block cloud metadata endpoints
+        if hostname in ("169.254.169.254", "metadata.google.internal", "100.100.100.200"):
+            return False, "Access to cloud metadata endpoints is blocked"
+        
+        # Resolve hostname and check for private IPs
+        try:
+            for info in socket.getaddrinfo(hostname, None):
+                addr = info[4][0]
+                ip = ipaddress.ip_address(addr)
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                    return False, f"Access to private/internal IP {addr} is blocked"
+        except socket.gaierror:
+            pass  # Let the request fail naturally if DNS fails
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Invalid URL: {e}"
 
 
 async def http_request(url: str, method: str = "GET", headers: str = "{}", body: str = "") -> str:
     """Make an HTTP request and return the response."""
     import urllib.request
     import urllib.error
+
+    # SSRF protection: block internal/private URLs
+    safe, reason = _is_url_safe(url)
+    if not safe:
+        return json.dumps({"error": f"BLOCKED: {reason}"})
 
     try:
         hdrs = json.loads(headers) if headers else {}

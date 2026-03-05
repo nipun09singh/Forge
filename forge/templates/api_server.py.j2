@@ -62,6 +62,7 @@ def _get_api_key():
 
 async def verify_api_key(authorization: str = Header(default="", alias="Authorization")):
     """Verify API key from Authorization: Bearer <key> header."""
+    import hmac
     expected = _get_api_key()
     if not expected:
         return  # Auth disabled if no key configured
@@ -73,7 +74,7 @@ async def verify_api_key(authorization: str = Header(default="", alias="Authoriz
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid Authorization format. Use: Authorization: Bearer <your-api-key>")
 
-    if parts[1] != expected:
+    if not hmac.compare_digest(parts[1], expected):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -427,6 +428,149 @@ async def get_experiments():
         "completed": _agency._ab_test_manager.get_completed_tests(),
     }
 
+
+class ProjectRequest(BaseModel):
+    """Request to build a complete project."""
+    task: str
+    workdir: str = "./workspace/project"
+
+
+@app.post("/api/project", dependencies=[Depends(verify_api_key)])
+async def execute_project(request: ProjectRequest):
+    """Build a complete multi-file project using the full agent team."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    
+    # Validate workdir is within allowed workspace
+    import os
+    from pathlib import Path
+    allowed_base = Path("./workspace").resolve()
+    requested = Path(request.workdir).resolve()
+    try:
+        requested.relative_to(allowed_base)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="workdir must be within ./workspace/ directory")
+    
+    result = await _agency.execute_project(
+        task=request.task,
+        workdir=request.workdir,
+    )
+    return result
+
+
+# ═══════════════════════════════════════════════════════════
+# Level 3-5: Autonomous Operation Endpoints
+# ═══════════════════════════════════════════════════════════
+
+@app.post("/api/autonomous/start", dependencies=[Depends(verify_api_key)])
+async def start_autonomous():
+    """Start 24/7 autonomous inbound processing."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    await _agency.inbound.start()
+    return {"started": True, "channels": list(_agency.inbound._channels.keys())}
+
+
+@app.post("/api/autonomous/stop", dependencies=[Depends(verify_api_key)])
+async def stop_autonomous():
+    """Stop autonomous processing."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    await _agency.inbound.stop()
+    return {"stopped": True}
+
+
+@app.get("/api/autonomous/status", dependencies=[Depends(verify_api_key)])
+async def autonomous_status():
+    """Get autonomous processing status."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    return _agency.inbound.get_stats()
+
+
+@app.post("/api/evolve", dependencies=[Depends(verify_api_key)])
+async def run_evolution():
+    """Trigger a self-evolution cycle."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    agent_map = {}
+    for team in _agency.teams.values():
+        if team.lead:
+            agent_map[team.lead.name] = team.lead
+        for a in team.agents:
+            agent_map[a.name] = a
+    records = await _agency.self_evolution.run_evolution_cycle(agent_map)
+    return {"improvements": len(records), "details": _agency.self_evolution.get_history()}
+
+
+@app.get("/api/evolution/history", dependencies=[Depends(verify_api_key)])
+async def evolution_history():
+    """Get self-evolution history."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    return {
+        "history": _agency.self_evolution.get_history(),
+        "stats": _agency.self_evolution.get_stats(),
+    }
+
+
+@app.post("/api/spawn", dependencies=[Depends(verify_api_key)])
+async def spawn_agents():
+    """Check for gaps and autonomously spawn new agents."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    spawned = await _agency.agent_spawner.check_and_spawn(_agency)
+    return {
+        "spawned": len(spawned),
+        "agents": _agency.agent_spawner.get_spawned_agents(),
+    }
+
+
+@app.get("/api/spawned", dependencies=[Depends(verify_api_key)])
+async def get_spawned():
+    """Get all autonomously spawned agents."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    return {"agents": _agency.agent_spawner.get_spawned_agents(), "stats": _agency.agent_spawner.get_stats()}
+
+
+class StressTestRequest(BaseModel):
+    domain: str
+    scenarios_per_round: int = 10
+    target_pass_rate: float = 0.90
+    max_cycles: int = 3
+
+@app.post("/api/stress-test", dependencies=[Depends(verify_api_key)])
+async def run_stress_test(request: StressTestRequest):
+    """Run a full stress test with infinite improvement loop."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    reports = await _agency.stress_lab.run_full_cycle(
+        domain=request.domain,
+        scenarios_per_round=request.scenarios_per_round,
+        target_pass_rate=request.target_pass_rate,
+        max_cycles=request.max_cycles,
+    )
+    return {"cycles": len(reports), "reports": _agency.stress_lab.get_reports()}
+
+@app.get("/api/stress-test/results", dependencies=[Depends(verify_api_key)])
+async def stress_test_results():
+    """Get stress test results."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    return {"reports": _agency.stress_lab.get_reports()}
+
+class OrchestrateBuildRequest(BaseModel):
+    task: str
+    workdir: str = "./workspace/project"
+
+@app.post("/api/orchestrate", dependencies=[Depends(verify_api_key)])
+async def orchestrate_build(request: OrchestrateBuildRequest):
+    """Build a complete project using the intelligent orchestrator (recommended over /api/project)."""
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    result = await _agency.orchestrate(task=request.task, workdir=request.workdir)
+    return result
 
 @app.get("/health")
 async def health():

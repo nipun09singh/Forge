@@ -193,11 +193,14 @@ class TestCheckpointingDirect:
     def test_load_latest(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CheckpointStore(os.path.join(tmp, "cp.db"))
-            store.save("agent", "a1", {"step": 1})
-            store.save("agent", "a1", {"step": 2})
-            latest = store.load_latest("agent", "a1")
-            assert latest["state"]["step"] == 2
-            store.close()
+            try:
+                store.save("agent", "a1", {"step": 1})
+                store.save("agent", "a1", {"step": 2})
+                latest = store.load_latest("agent", "a1")
+                assert latest is not None
+                assert latest["state"]["step"] == 2
+            finally:
+                store.close()
 
     def test_list_checkpoints(self):
         with tempfile.TemporaryDirectory() as tmp:

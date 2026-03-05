@@ -115,6 +115,8 @@ class LLMClient:
             max_retries=self.max_retries,
         )
         self._track_usage(response)
+        if not response.choices:
+            return ""
         return response.choices[0].message.content or ""
 
     async def complete_structured(
@@ -168,6 +170,8 @@ class LLMClient:
             else:
                 raise
         self._track_usage(response)
+        if not response.choices:
+            raise ValueError("LLM returned empty choices array — content may have been filtered")
         content = response.choices[0].message.content or "{}"
 
         # Parse and validate
@@ -206,6 +210,8 @@ class LLMClient:
             max_retries=self.max_retries,
         )
         self._track_usage(response)
+        if not response.choices:
+            return {"content": None}
         choice = response.choices[0]
 
         result: dict[str, Any] = {"content": choice.message.content}

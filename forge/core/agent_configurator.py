@@ -235,9 +235,10 @@ class AgentConfigurator:
 
     def configure(self, agent_name: str = "", role: str = "specialist") -> AgentConfig:
         """Get the optimal primitive configuration for this agent in this domain."""
-        # Start with role defaults
+        import copy
+        # Start with role defaults — deep copy to avoid mutating global defaults
         base = ROLE_CONFIGS.get(role, ROLE_CONFIGS["specialist"])
-        config = AgentConfig(**{k: v for k, v in base.__dict__.items()})
+        config = copy.deepcopy(base)
 
         # Apply domain overrides
         domain_overrides = DOMAIN_OVERRIDES.get(self.domain, {})

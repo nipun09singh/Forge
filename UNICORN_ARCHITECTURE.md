@@ -31,55 +31,36 @@ Here's what we have vs. what a unicorn needs. No sugarcoating.
 | Self-improvement | ✅ Built | Reflection loops, performance tracking. Most frameworks lack this. |
 | Revenue-focused design | ✅ Built | Business ambition critic is unique in the market. |
 
-### ❌ What's Missing (The Unicorn Gaps)
+### ✅ Gaps Closed Since Initial Analysis
 
-These are ranked by **how much they affect whether anyone will pay real money**.
+These gaps were identified early and have since been **fully implemented**:
 
-#### 🔴 GAP 1: No Observability (CRITICAL)
-**What:** No logging, tracing, audit trails, dashboards. When something goes wrong in a generated agency, you're blind.
-
-**Why it kills you:** 68% of enterprise deployments limit agents to ≤10 steps because they can't see what's happening. Enterprises will NOT deploy what they can't observe.
-
-**What unicorns have:** LangSmith (tracing), Arize (monitoring), every enterprise deal requires audit logs.
-
-**What to build:**
-- Structured event logging (every LLM call, tool use, agent decision)
-- Trace IDs that follow a task across agents
-- Cost tracking (tokens used, $ spent per task)
-- Exportable audit logs for compliance
-- Real-time agent activity dashboard
+#### ✅ GAP 1: Observability — CLOSED
+**Built:** `observability.py` (EventLog, TraceContext, CostTracker), `logging_config.py` (structured JSON logging). Every LLM call, tool use, and agent decision is logged with trace IDs and cost tracking.
 
 ---
 
-#### 🔴 GAP 2: No Persistent Memory (CRITICAL)
-**What:** Our SharedMemory is an in-memory Python dict. It dies when the process stops. No vector search, no long-term learning.
-
-**Why it kills you:** Agents that forget everything between sessions are useless for real work. The data flywheel (agents get smarter from every interaction) is the #1 compounding advantage.
-
-**What unicorns have:** Vector DBs (Pinecone, Chroma, Weaviate), RAG pipelines, conversation history, knowledge bases.
-
-**What to build:**
-- Pluggable memory backends (SQLite for dev, PostgreSQL for prod, vector DB for semantic search)
-- RAG pipeline — agents retrieve relevant past interactions before acting
-- Knowledge base per agency — domain-specific facts, policies, procedures
-- Cross-session memory — agent learns from customer interactions over time
+#### ✅ GAP 2: Persistent Memory — CLOSED
+**Built:** `persistence.py` (SQLiteMemoryBackend), `checkpointing.py` (state save/restore), `memory.py` (pluggable backends). Agents persist knowledge across sessions via SQLite.
 
 ---
 
-#### 🔴 GAP 3: No Real Integrations (CRITICAL)
-**What:** Every generated tool is a stub (`# TODO: Implement`). Agents can't actually DO anything in the real world.
-
-**Why it kills you:** An agency with 20 agents and zero working tools is a demo, not a product. The moment someone runs `forge create`, they get a project full of TODO comments.
-
-**What unicorns have:** Pre-built connectors (Slack, Email, Stripe, Salesforce, databases, REST APIs).
-
-**What to build:**
-- Integration SDK — standard way to connect tools to real APIs
-- Pre-built tool packs: communication (email, Slack, SMS), data (SQL, REST, GraphQL), payments (Stripe), CRM (HubSpot, Salesforce)
-- MCP (Model Context Protocol) support — the emerging standard for agent-tool interop
-- Auto-detection: when domain mentions "email," generate a working email tool, not a stub
+#### ✅ GAP 3: Real Integrations — CLOSED
+**Built:** 9 working tool integrations in `integrations/`: HTTP requests, email (SMTP), SQL (SQLite), file I/O, webhooks, shell commands, git operations, web browsing, web search (DuckDuckGo). Generated tools use real implementations, not stubs.
 
 ---
+
+#### ✅ GAP 5: Human-in-the-Loop — CLOSED
+**Built:** `human.py` (HumanApprovalGate, WebhookApprovalGate). Configurable approval flows with urgency levels, auto-approve for low-risk tasks.
+
+---
+
+#### ✅ GAP 8: Agent Communication Protocol — CLOSED
+**Built:** `messages.py` (typed AgentMessage, MessageBus with pub/sub). Agents communicate via structured Pydantic messages with types, priorities, and routing.
+
+---
+
+### ❌ Remaining Gaps (Still Open)
 
 #### 🟡 GAP 4: No Multi-Tenancy / SaaS Mode (IMPORTANT)
 **What:** Every generated agency is a standalone Python project. You can't serve 100 customers from one deployment.
@@ -91,19 +72,6 @@ These are ranked by **how much they affect whether anyone will pay real money**.
 - Customer management — accounts, API keys, usage quotas
 - Metered billing — charge per task, per agent-hour, or per API call
 - White-labeling — customers can brand the agency as their own
-
----
-
-#### 🟡 GAP 5: No Human-in-the-Loop (IMPORTANT)
-**What:** Our quality gates are AI-only. No human can approve, reject, or guide agent decisions.
-
-**Why it matters:** Enterprise deployments REQUIRE human oversight for high-stakes decisions. Regulated industries (finance, healthcare) are legally obligated.
-
-**What to build:**
-- Approval workflows — agent pauses, notifies human, waits for approval
-- Escalation protocols — agent recognizes when it's out of its depth
-- Human feedback loop — human ratings feed into agent improvement
-- Configurable autonomy levels: full-auto, human-approve, human-in-the-loop
 
 ---
 
@@ -127,16 +95,6 @@ These are ranked by **how much they affect whether anyone will pay real money**.
 - Agent template marketplace (community-contributed agent personas)
 - Tool plugin registry (install tools like npm packages)
 - Domain packs ("Healthcare Pack" with HIPAA-aware agents, medical tools)
-
----
-
-#### 🟢 GAP 8: No Agent Communication Protocol (FUTURE)
-**What:** Agents communicate via loose text. No strict schemas between agents.
-
-**What to build (later):**
-- Typed message contracts between agents (Pydantic models, not raw strings)
-- Support for A2A (Agent-to-Agent protocol) / MCP standards
-- Inter-agency communication (agencies talking to other agencies)
 
 ---
 

@@ -2,12 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Create non-root user for security
+RUN groupadd -r agency && useradd -r -g agency agency
+
 # Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy agency code
 COPY . .
+
+# Switch to non-root user
+USER agency
 
 # Expose API port
 EXPOSE 8000

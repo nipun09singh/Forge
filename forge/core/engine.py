@@ -81,7 +81,17 @@ class ForgeEngine:
         ) as progress:
             # Phase 1: Analyze domain and create blueprint
             task = progress.add_task("Analyzing domain and designing agency...", total=None)
-            blueprint = await self.analyzer.analyze(domain_description, model=self.model)
+            try:
+                blueprint = await self.analyzer.analyze(domain_description, model=self.model)
+            except Exception as e:
+                logger.error(f"Domain analysis failed: {e}. Retrying with simpler prompt...")
+                try:
+                    # Retry with a simpler approach
+                    blueprint = await self.analyzer.analyze(
+                        f"Simple agency for: {domain_description[:200]}", model=self.model
+                    )
+                except Exception as e2:
+                    raise RuntimeError(f"Agency generation failed after retry: {e2}") from e
             progress.update(task, description="[green]✓ Blueprint drafted")
 
             # Phase 2: Inject universal archetypes (QA, Intake, Self-Improvement, Analytics)

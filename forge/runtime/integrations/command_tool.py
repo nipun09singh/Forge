@@ -53,6 +53,19 @@ def _is_command_safe(command: str) -> tuple[bool, str]:
         ("|" in cmd_lower and any(sh in cmd_lower.split("|")[-1] for sh in ["bash", "sh", "zsh", "python", "perl"]))):
         return False, "Blocked: piping network output to shell interpreter"
 
+    # Block encoded payload execution
+    if "base64" in cmd_lower and ("|" in cmd_lower or ">" in cmd_lower):
+        return False, "Blocked: base64 decoding with piping/redirect"
+
+    # Block reading sensitive system files
+    sensitive_paths = ["/etc/shadow", "/etc/passwd", "/etc/sudoers", ".ssh/", "id_rsa"]
+    if any(sp in cmd_lower for sp in sensitive_paths):
+        return False, "Blocked: accessing sensitive system files"
+
+    # Block environment variable dumping (credential exposure)
+    if cmd_lower.strip() in ("env", "printenv", "set"):
+        return False, "Blocked: environment variable dump (may expose secrets)"
+
     return True, ""
 
 
@@ -61,6 +74,7 @@ async def run_command(
     workdir: str = ".",
     timeout: int = 30,
     shell: bool = True,
+    background: bool = False,
 ) -> str:
     """
     Execute a shell command in a sandboxed subprocess.
@@ -82,6 +96,31 @@ async def run_command(
     # Ensure workdir exists
     work_path = Path(workdir).resolve()
     work_path.mkdir(parents=True, exist_ok=True)
+
+    if background:
+        try:
+            import subprocess as sp
+            if platform.system() == "Windows":
+                process = sp.Popen(
+                    command, shell=True, cwd=str(work_path),
+                    stdout=sp.DEVNULL, stderr=sp.DEVNULL,
+                    creationflags=sp.CREATE_NEW_PROCESS_GROUP,
+                )
+            else:
+                process = sp.Popen(
+                    command, shell=True, cwd=str(work_path),
+                    stdout=sp.DEVNULL, stderr=sp.DEVNULL,
+                    start_new_session=True,
+                )
+            return json.dumps({
+                "background": True,
+                "pid": process.pid,
+                "command": command,
+                "success": True,
+                "message": f"Process started in background with PID {process.pid}",
+            })
+        except Exception as e:
+            return json.dumps({"background": True, "success": False, "error": str(e)})
 
     start_time = time.time()
 
@@ -169,6 +208,7 @@ def create_command_tool(default_workdir: str = "./workspace", default_timeout: i
             ToolParameter(name="command", type="string", description="The shell command to execute"),
             ToolParameter(name="workdir", type="string", description="Working directory (default: ./workspace)", required=False),
             ToolParameter(name="timeout", type="integer", description="Timeout in seconds (default: 30, max: 300)", required=False),
+            ToolParameter(name="background", type="boolean", description="If true, start process in background (for servers). Returns PID.", required=False),
         ],
         _fn=run_command,
     )
