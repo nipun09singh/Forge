@@ -35,13 +35,16 @@ class BuiltinToolkit:
         if smtp_host:
             tools.append(create_email_tool(smtp_host=smtp_host))
         tools.append(create_webhook_tool())
-        tools.append(create_command_tool(sandbox_dir))
+        tools.append(create_command_tool())
         tools.append(create_git_tool())
         tools.append(create_browser_tool())
         tools.append(create_search_tool())
         return tools
 
     @staticmethod
-    def get_tool_names() -> list[str]:
+    def get_tool_names(include_email: bool = True) -> list[str]:
         """Get names of all available built-in tools."""
-        return ["http_request", "send_email", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web", "web_search"]
+        names = ["http_request", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web", "web_search"]
+        if include_email:
+            names.append("send_email")
+        return names
