@@ -171,3 +171,71 @@ class TestOrchestratorResult:
         )
         assert len(r.files_created) == 2
         assert r.total_tokens == 1000
+
+
+class TestDiscoverTool:
+    """Tests for the discover_tool meta-tool and 5-primitives principle."""
+
+    def test_orchestrator_starts_with_exactly_6_tools(self):
+        """Orchestrator loads exactly 6 tools: 5 primitives + discover_tool."""
+        orch = OrchestratorAgent()
+        orch._ensure_tools()
+        assert len(orch._tools) == 6
+        names = {t.name for t in orch._tools}
+        assert "discover_tool" in names
+        for prim in ["read_write_file", "run_command", "http_request", "web_search", "browse_web"]:
+            assert prim in names, f"Missing primitive: {prim}"
+
+    @pytest.mark.asyncio
+    async def test_discover_tool_list_returns_all_library_tools(self):
+        """discover_tool(action='list') returns JSON with all library tools."""
+        orch = OrchestratorAgent()
+        orch._ensure_tools()
+        tool = orch._tool_map["discover_tool"]
+        result = await tool.run(action="list")
+        catalog = json.loads(result)
+        from forge.runtime.integrations import BuiltinToolkit
+        lib = BuiltinToolkit.library()
+        assert len(catalog) == len(lib)
+        catalog_names = {item["name"] for item in catalog}
+        for name in lib:
+            assert name in catalog_names
+
+    @pytest.mark.asyncio
+    async def test_discover_tool_load_adds_tool(self):
+        """discover_tool(action='load', tool_name='git_operation') adds the tool."""
+        orch = OrchestratorAgent()
+        orch._ensure_tools()
+        assert "git_operation" not in orch._tool_map
+        tool = orch._tool_map["discover_tool"]
+        result = await tool.run(action="load", tool_name="git_operation")
+        data = json.loads(result)
+        assert data["status"] == "loaded"
+        assert "git_operation" in orch._tool_map
+
+    @pytest.mark.asyncio
+    async def test_discover_tool_load_invalid_name_returns_error(self):
+        """discover_tool(action='load', tool_name='nonexistent') returns an error."""
+        orch = OrchestratorAgent()
+        orch._ensure_tools()
+        tool = orch._tool_map["discover_tool"]
+        result = await tool.run(action="load", tool_name="nonexistent_tool")
+        data = json.loads(result)
+        assert "error" in data
+        assert "Unknown tool" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_loaded_tool_appears_in_schema(self):
+        """After loading a tool, it appears in the orchestrator's tool schema."""
+        orch = OrchestratorAgent()
+        orch._ensure_tools()
+        schema_before = orch._get_tools_schema()
+        names_before = {s["function"]["name"] for s in schema_before}
+        assert "send_sms" not in names_before
+
+        tool = orch._tool_map["discover_tool"]
+        await tool.run(action="load", tool_name="send_sms")
+
+        schema_after = orch._get_tools_schema()
+        names_after = {s["function"]["name"] for s in schema_after}
+        assert "send_sms" in names_after

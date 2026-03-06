@@ -104,23 +104,70 @@ class OrchestratorAgent:
         self._guardrails = guardrails
 
     def _ensure_tools(self) -> None:
-        """Load primitive tools. The AI can pull integrations from the library when needed."""
+        """Load primitive tools + discover_tool. The AI discovers everything else at runtime."""
         if self._tools:
             return
         try:
             from forge.runtime.integrations import BuiltinToolkit
-            # Start with 5 primitives — the AI builds/discovers everything else
+            # Start with exactly 5 primitives
             self._tools = BuiltinToolkit.primitives()
-            # Also load git and sql as they're useful infrastructure
-            for infra_tool in ["git_operation", "query_database"]:
-                tool = BuiltinToolkit.get_tool(infra_tool)
-                if tool:
-                    self._tools.append(tool)
-            self._tool_map = {t.name: t for t in self._tools}
             self._tool_library = BuiltinToolkit.library()
+            # Add discover_tool as the 6th tool — the gateway to the library
+            self._tools.append(self._create_discover_tool())
+            self._tool_map = {t.name: t for t in self._tools}
         except ImportError:
             logger.warning("BuiltinToolkit not available")
             self._tool_library = {}
+
+    def _create_discover_tool(self) -> Any:
+        """Create the discover_tool meta-tool for runtime tool discovery."""
+        from forge.runtime.tools import Tool, ToolParameter
+
+        async def discover_tool(action: str = "list", tool_name: str = "") -> str:
+            """Discover and load tools from the Forge library.
+
+            Actions:
+              - list: Show all available library tools with descriptions
+              - load: Load a specific tool by name and make it available
+            """
+            if action == "list":
+                catalog = []
+                for name, entry in self._tool_library.items():
+                    catalog.append({
+                        "name": name,
+                        "description": entry.get("description", ""),
+                        "category": entry.get("category", ""),
+                        "required_env_vars": entry.get("env_vars", []),
+                    })
+                return json.dumps(catalog, indent=2)
+            elif action == "load":
+                if not tool_name:
+                    return json.dumps({"error": "tool_name is required for load action"})
+                if tool_name in self._tool_map:
+                    return json.dumps({"status": "already_loaded", "tool": tool_name})
+                from forge.runtime.integrations import BuiltinToolkit
+                tool = BuiltinToolkit.get_tool(tool_name)
+                if tool is None:
+                    return json.dumps({"error": f"Unknown tool: {tool_name}"})
+                self._tools.append(tool)
+                self._tool_map[tool.name] = tool
+                return json.dumps({"status": "loaded", "tool": tool.name})
+            else:
+                return json.dumps({"error": f"Unknown action: {action}. Use 'list' or 'load'."})
+
+        return Tool(
+            name="discover_tool",
+            description=(
+                "Discover and load tools from the Forge library. "
+                "Use action='list' to browse available integrations, "
+                "action='load' with tool_name to activate one."
+            ),
+            parameters=[
+                ToolParameter(name="action", type="string", description="Action to perform: 'list' or 'load'", required=False, default="list", enum=["list", "load"]),
+                ToolParameter(name="tool_name", type="string", description="Name of the tool to load (required for 'load' action)", required=False, default=""),
+            ],
+            _fn=discover_tool,
+        )
 
     def _get_tools_schema(self) -> list[dict]:
         """Get OpenAI function-calling schema for all tools."""
@@ -236,9 +283,12 @@ class OrchestratorAgent:
             "- run_command(command, workdir): Execute ANY shell command (install, test, build, deploy)\n"
             "- browse_web(url): Read ANY webpage (API docs, tutorials, references)\n"
             "- web_search(query): Search the internet (DuckDuckGo) for market research, docs, competitors\n"
-            "- http_request(url, method, headers, body): Make HTTP requests to test APIs\n"
-            "- query_database(query): Run SQL queries on SQLite\n"
-            "- git_operation(operation, args): Git version control\n\n"
+            "- http_request(url, method, headers, body): Make HTTP requests to test APIs\n\n"
+            "═══ TOOL LIBRARY ═══\n"
+            "You have 5 primitive tools plus a `discover_tool` that lets you browse and load specialized "
+            "integrations (SMS, payments, calendar, etc.) from the Forge library. "
+            "Use `discover_tool(action='list')` during RESEARCH to see what's available, then "
+            "`discover_tool(action='load', tool_name='send_sms')` when you need it.\n\n"
             "START BUILDING NOW. Create the project structure first, then implement each file."
         )
 
@@ -360,6 +410,25 @@ class OrchestratorAgent:
                                 continue
 
                         if tool:
+                            # Confidence-gated autonomy check
+                            confidence = self._confidence_scorer.score_tool_call(fn_name, args)
+                            if confidence.level == "low":
+                                logger.warning(
+                                    f"LOW confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
+                                )
+                                if self._event_log:
+                                    self._event_log.emit(Event(
+                                        event_type=EventType.TOOL_USE,
+                                        agent_name="orchestrator",
+                                        data={"tool": fn_name, "confidence": confidence.score, "confidence_level": "low", "reasoning": confidence.reasoning},
+                                        level="warning",
+                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                                    ))
+                            elif confidence.level == "medium":
+                                logger.info(
+                                    f"MEDIUM confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
+                                )
+
                             try:
                                 # Set workdir for command/file tools
                                 if fn_name == "run_command" and "workdir" not in args:
