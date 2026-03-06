@@ -157,15 +157,4 @@ class ReActExecutor(ExecutorBase):
         return f"ReActExecutor(max_iterations={self.max_iterations})"
 
 
-class MultiStepExecutor(ExecutorBase):
-    """Executes a pre-planned sequence of steps, checkpointing between each."""
 
-    def __init__(self, checkpoint_between_steps: bool = True):
-        self.checkpoint = checkpoint_between_steps
-
-    async def execute(self, task, system_prompt, tools_schema, tool_executor, llm_client, model, temperature, conversation=None):
-        # Delegates to ReAct for each step but tracks progress
-        react = ReActExecutor(max_iterations=10)
-        result = await react.execute(task, system_prompt, tools_schema, tool_executor, llm_client, model, temperature, conversation)
-        result.metadata["executor_type"] = "multi_step"
-        return result

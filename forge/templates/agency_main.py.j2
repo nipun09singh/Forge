@@ -90,12 +90,11 @@ except ImportError:
 try:
     from forge.runtime.primitives import (
         SimplePlanner, SequentialPlanner, DAGPlanner, ClassifyAndRoutePlanner,
-        SingleShotExecutor, ReActExecutor, MultiStepExecutor,
+        SingleShotExecutor, ReActExecutor,
         BinaryCritic, ScoredCritic, FactualCritic, ComplianceCritic,
         EscalationPolicy, EscalationLevel, EscalationStep,
     )
     from forge.runtime.knowledge import DomainKnowledge, get_domain_knowledge
-    from forge.core.agent_configurator import AgentConfigurator
     _has_primitives = True
 except ImportError:
     _has_primitives = False
@@ -225,8 +224,6 @@ def build_agency() -> tuple[Agency, EventLog]:
         if domain_knowledge and domain_knowledge.policies:
             memory.store("domain:knowledge", domain_knowledge.to_dict(), author="system", tags=["knowledge"])
             logger.info(f"Loaded domain knowledge: {len(domain_knowledge.policies)} policies")
-
-        configurator = AgentConfigurator(domain="{{ domain | default('general') }}")
 
     # ─── Checkpointing (optional) ────────────────────────────
     if CheckpointStore:

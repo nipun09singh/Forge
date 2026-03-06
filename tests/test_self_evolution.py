@@ -1,5 +1,6 @@
 """Tests for forge.runtime.self_evolution."""
 
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -108,11 +109,6 @@ class TestEvolutionHistory:
         assert "cycles_completed" in stats
         assert stats["cycles_completed"] == 0
 
-    def test_cleanup_prompt_bloat(self):
-        evo = SelfEvolution(None, None, llm_client=None)
-        agent = Agent(name="Test", role="test", system_prompt="Base prompt\n\n[Auto-improvement]: tip1\n\n[Auto-improvement]: tip2\n\n[Auto-improvement]: tip3\n\n[Auto-improvement]: tip4\n\n[Auto-improvement]: tip5\n\n[Auto-improvement]: tip6")
-        removed = evo.cleanup_prompt_bloat({"Test": agent})
-        assert removed >= 0
 
 
 class TestEvolutionRecord:
@@ -284,44 +280,7 @@ class TestPromptOptimizerInit:
 
 
 class TestDefaultMetric:
-    """Tests for PromptOptimizer._default_metric (LLM-as-judge)."""
-
-    @pytest.mark.asyncio
-    async def test_calls_llm_for_evaluation(self):
-        """_default_metric should call the LLM to evaluate the candidate prompt."""
-        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
-        client = AsyncMock()
-        client.chat.completions.create = AsyncMock(
-            return_value=_mock_llm_response("0.85")
-        )
-        optimizer = PromptOptimizer(client, tracker)
-        score = await optimizer._default_metric("Test prompt", "TestAgent")
-        client.chat.completions.create.assert_called_once()
-        call_kwargs = client.chat.completions.create.call_args
-        assert call_kwargs.kwargs["model"] == "gpt-4o-mini"
-        assert score == 0.85
-
-    @pytest.mark.asyncio
-    async def test_returns_parsed_float(self):
-        """_default_metric should parse the LLM response as a float score."""
-        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
-        client = AsyncMock()
-        client.chat.completions.create = AsyncMock(
-            return_value=_mock_llm_response("0.72")
-        )
-        optimizer = PromptOptimizer(client, tracker)
-        score = await optimizer._default_metric("Some prompt", "TestAgent")
-        assert score == 0.72
-
-    @pytest.mark.asyncio
-    async def test_returns_fallback_on_llm_error(self):
-        """_default_metric should return 0.5 when the LLM call fails."""
-        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
-        client = AsyncMock()
-        client.chat.completions.create = AsyncMock(side_effect=Exception("API error"))
-        optimizer = PromptOptimizer(client, tracker)
-        score = await optimizer._default_metric("Some prompt", "TestAgent")
-        assert score == 0.5
+    """Tests for PromptOptimizer._default_metric (real task execution)."""
 
     @pytest.mark.asyncio
     async def test_returns_neutral_when_no_failures(self):
@@ -331,7 +290,48 @@ class TestDefaultMetric:
         optimizer = PromptOptimizer(client, tracker)
         score = await optimizer._default_metric("Some prompt", "TestAgent")
         assert score == 0.5
-        client.chat.completions.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_creates_agent_and_runs_task(self):
+        """_default_metric should create a test agent, run a failing task, and score based on result."""
+        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
+        client = AsyncMock()
+        optimizer = PromptOptimizer(client, tracker)
+
+        mock_result = MagicMock()
+        mock_result.success = True
+        mock_result.confidence = 0.9
+
+        with patch("forge.runtime.agent.Agent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.execute = AsyncMock(return_value=mock_result)
+            MockAgent.return_value = mock_agent_instance
+
+            score = await optimizer._default_metric("Test prompt", "TestAgent")
+
+            MockAgent.assert_called_once_with(
+                name="_eval_TestAgent",
+                role="specialist",
+                system_prompt="Test prompt",
+            )
+            mock_agent_instance.set_llm_client.assert_called_once_with(client)
+            mock_agent_instance.execute.assert_called_once()
+            assert score == min(1.0, 0.7 + 0.9 * 0.3)
+
+    @pytest.mark.asyncio
+    async def test_returns_timeout_score_on_timeout(self):
+        """_default_metric should return 0.4 when the agent execution times out."""
+        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
+        client = AsyncMock()
+        optimizer = PromptOptimizer(client, tracker)
+
+        with patch("forge.runtime.agent.Agent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.execute = AsyncMock(side_effect=asyncio.TimeoutError())
+            MockAgent.return_value = mock_agent_instance
+
+            score = await optimizer._default_metric("Test prompt", "TestAgent")
+            assert score == 0.4
 
 
 async def _async_metric_stub(candidate_prompt, agent_name):

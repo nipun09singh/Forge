@@ -146,39 +146,38 @@ class PromptOptimizer:
         return result
 
     async def _default_metric(self, candidate_prompt: str, agent_name: str) -> float:
-        """Score a candidate prompt by LLM evaluation against failure patterns."""
-        failures = self.tracker.get_failure_patterns(limit=10)
+        """Score a candidate prompt by actually running a sample failing task."""
+        failures = self.tracker.get_failure_patterns(limit=5)
         agent_failures = [f for f in failures if f.get("agent") == agent_name]
 
         if not agent_failures:
-            return 0.5  # No data — neutral score
+            return 0.5  # No data
 
-        failure_descriptions = "\n".join(
-            f"- Task: {f.get('task', '?')} | Quality: {f.get('quality_score', 'unknown')}"
-            for f in agent_failures[:5]
+        # Pick one failing task to re-test
+        test_task = agent_failures[0].get("task", "")
+        if not test_task:
+            return 0.5
+
+        # Create a temporary agent with the candidate prompt and run the task
+        from forge.runtime.agent import Agent
+        test_agent = Agent(
+            name=f"_eval_{agent_name}",
+            role="specialist",
+            system_prompt=candidate_prompt,
         )
-
-        messages = [
-            {"role": "system", "content": "You are evaluating an AI agent's system prompt for effectiveness. Score 0.0 to 1.0."},
-            {"role": "user", "content": (
-                f"PROMPT TO EVALUATE:\n{candidate_prompt[:2000]}\n\n"
-                f"KNOWN FAILURE PATTERNS THIS AGENT HAS:\n{failure_descriptions}\n\n"
-                f"Score this prompt 0.0-1.0 on how well it would handle these failure patterns. "
-                f"Return ONLY a number between 0.0 and 1.0."
-            )}
-        ]
+        test_agent.set_llm_client(self.llm_client)
 
         try:
-            response = await self.llm_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.1,
-                max_tokens=10,
+            result = await asyncio.wait_for(
+                test_agent.execute(test_task),
+                timeout=30.0,
             )
-            score_text = response.choices[0].message.content.strip()
-            return max(0.0, min(1.0, float(score_text)))
-        except Exception:
-            return 0.5  # Fallback on error
+            # Score based on actual execution result
+            if result.success:
+                return min(1.0, 0.7 + result.confidence * 0.3)
+            return 0.3
+        except (asyncio.TimeoutError, Exception):
+            return 0.4  # Timeout/error = slightly better than nothing
 
 
 class SelfEvolution:
@@ -417,22 +416,6 @@ class SelfEvolution:
             "applied_improvements": sum(1 for r in self._history if r.applied),
             "running": self._running,
         }
-
-    def cleanup_prompt_bloat(self, agents: dict[str, Any]) -> int:
-        """Remove old [Auto-improvement] blocks if prompt is getting too long."""
-        cleaned = 0
-        for name, agent in agents.items():
-            if hasattr(agent, 'system_prompt'):
-                blocks = agent.system_prompt.count("[Auto-improvement]")
-                if blocks > 5:
-                    # Keep only the last 3 improvements
-                    parts = agent.system_prompt.split("\n\n[Auto-improvement]:")
-                    base = parts[0]
-                    improvements = parts[1:] if len(parts) > 1 else []
-                    kept = improvements[-3:] if len(improvements) > 3 else improvements
-                    agent.system_prompt = base + "".join(f"\n\n[Auto-improvement]:{imp}" for imp in kept)
-                    cleaned += blocks - len(kept)
-        return cleaned
 
     async def rollback_mutation(self, agent: Any, mutation_record: EvolutionRecord) -> bool:
         """Rollback a specific mutation if performance degraded.
