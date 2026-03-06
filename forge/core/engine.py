@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from forge.core.blueprint import AgencyBlueprint
 from forge.core.domain_analyzer import DomainAnalyzer
@@ -36,12 +36,16 @@ class ForgeEngine:
     All orchestrated by this engine.
     """
 
+    # Type alias for progress callbacks: fn(phase_name: str, detail: str)
+    ProgressCallback = Callable[[str, str], None]
+
     def __init__(
         self,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         output_dir: Path | None = None,
+        on_progress: ProgressCallback | None = None,
     ):
         self.llm = LLMClient(model=model, api_key=api_key, base_url=base_url)
         self.analyzer = DomainAnalyzer(self.llm)
@@ -56,12 +60,19 @@ class ForgeEngine:
             max_iterations=10,  # Will iterate up to 10 times for quality
         )
         self._history: list[dict[str, Any]] = []
+        self._on_progress = on_progress
+
+    def _emit_progress(self, phase: str, detail: str) -> None:
+        """Notify the progress callback, if registered."""
+        if self._on_progress:
+            self._on_progress(phase, detail)
 
     async def create_agency(
         self,
         domain_description: str,
         overwrite: bool = False,
         inject_archetypes_flag: bool = True,
+        include_business_archetypes: bool = False,
     ) -> tuple[AgencyBlueprint, Path]:
         """
         Create a complete AI agency from a domain description.
@@ -78,14 +89,17 @@ class ForgeEngine:
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
             console=console,
         ) as progress:
             # Phase 1: Analyze domain and create blueprint
             task = progress.add_task("Analyzing domain and designing agency...", total=None)
+            self._emit_progress("analyze", "Analyzing domain and designing agency")
             try:
                 blueprint = await self.analyzer.analyze(domain_description, model=self.model)
             except Exception as e:
                 logger.error(f"Domain analysis failed: {e}. Retrying with simpler prompt...")
+                self._emit_progress("analyze", "Retrying with simpler prompt")
                 try:
                     # Retry with a simpler approach
                     blueprint = await self.analyzer.analyze(
@@ -94,17 +108,25 @@ class ForgeEngine:
                 except Exception as e2:
                     raise RuntimeError(f"Agency generation failed after retry: {e2}") from e
             progress.update(task, description="[green]✓ Blueprint drafted")
+            self._emit_progress("analyze", "Blueprint drafted")
 
             # Phase 2: Inject universal archetypes (optional — founder mode skips this)
             if inject_archetypes_flag:
                 progress.update(task, description="Injecting universal agent archetypes...")
-                blueprint = inject_archetypes(blueprint)
+                self._emit_progress("archetypes", "Injecting universal agent archetypes")
+                blueprint = inject_archetypes(
+                    blueprint,
+                    include_business_archetypes=include_business_archetypes,
+                )
                 progress.update(task, description="[green]✓ Universal archetypes injected")
+                self._emit_progress("archetypes", "Universal archetypes injected")
             else:
                 progress.update(task, description="[cyan]⚡ Founder mode: AI decides agents (no archetype injection)")
+                self._emit_progress("archetypes", "Founder mode: skipping archetype injection")
 
             # Phase 3: Critique & Refinement Loop — iterate until quality standards are met
             progress.update(task, description="Running critique & refinement loop...")
+            self._emit_progress("refine", "Running critique & refinement loop")
             blueprint, refinement_history = await self.refinement_loop.refine(
                 blueprint=blueprint,
                 domain_description=domain_description,
@@ -112,26 +134,34 @@ class ForgeEngine:
             iterations = len(refinement_history)
             final_score = refinement_history[-1]["combined_score"] if refinement_history else 0
             progress.update(task, description=f"[green]✓ Quality verified ({iterations} iterations, score: {final_score:.0%})")
+            self._emit_progress("refine", f"Quality verified ({iterations} iterations, score: {final_score:.0%})")
 
             # Phase 4: Generate the agency project
             progress.update(task, description="Generating agency code...")
+            self._emit_progress("generate", "Generating agency code")
             output_path = self.generator.generate(blueprint, overwrite=overwrite)
             progress.update(task, description="[green]✓ Agency generated")
+            self._emit_progress("generate", "Agency generated")
 
             # Phase 5: Copy runtime into generated agency
             progress.update(task, description="Packaging runtime...")
+            self._emit_progress("package", "Packaging runtime")
             self._package_runtime(output_path)
             progress.update(task, description="[green]✓ Runtime packaged")
+            self._emit_progress("package", "Runtime packaged")
 
             # Phase 6: Validate generated agency
             progress.update(task, description="Validating generated agency...")
+            self._emit_progress("validate", "Validating generated agency")
             from forge.generators.validator import AgencyValidator
             validator = AgencyValidator()
             validation = validator.validate(output_path)
             if validation.passed:
                 progress.update(task, description=f"[green]✓ Validation passed ({validation.files_checked} files checked)")
+                self._emit_progress("validate", f"Validation passed ({validation.files_checked} files)")
             else:
                 progress.update(task, description=f"[yellow]⚠ Validation: {len(validation.errors)} errors, {len(validation.warnings)} warnings")
+                self._emit_progress("validate", f"Validation: {len(validation.errors)} errors, {len(validation.warnings)} warnings")
 
         # Summary
         self._print_summary(blueprint, output_path)

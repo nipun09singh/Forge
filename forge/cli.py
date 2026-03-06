@@ -11,6 +11,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.status import Status
 
 console = Console()
 
@@ -102,28 +104,44 @@ def create(domain, file, output, model, overwrite, api_key, base_url, pack, foun
         from forge.generators.agency_generator import AgencyGenerator
 
         console.print(f"[bold cyan]📦 Using domain pack: {pack}[/bold cyan]")
-        blueprint = create_from_pack(pack)
-        if not founder_mode:
-            blueprint = inject_archetypes(blueprint)
 
-        gen = AgencyGenerator(output_base=Path(output))
-        try:
-            output_path = gen.generate(blueprint, overwrite=overwrite)
-        except FileExistsError as e:
-            console.print(f"[bold red]Error:[/bold red] {e}")
-            console.print("Use --overwrite to replace.")
-            sys.exit(1)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Loading domain pack...", total=None)
+            blueprint = create_from_pack(pack)
+            progress.update(task, description="[green]✓ Domain pack loaded")
 
-        # Package runtime into generated agency
-        import shutil
-        runtime_src = Path(__file__).parent / "runtime"
-        runtime_dst = output_path / "forge" / "runtime"
-        forge_pkg = output_path / "forge"
-        forge_pkg.mkdir(exist_ok=True)
-        (forge_pkg / "__init__.py").write_text('"""Forge runtime — bundled with generated agency."""\n', encoding="utf-8")
-        if runtime_dst.exists():
-            shutil.rmtree(str(runtime_dst))
-        shutil.copytree(str(runtime_src), str(runtime_dst), ignore=shutil.ignore_patterns("__pycache__"))
+            if not founder_mode:
+                progress.update(task, description="Injecting universal archetypes...")
+                blueprint = inject_archetypes(blueprint)
+                progress.update(task, description="[green]✓ Archetypes injected")
+
+            progress.update(task, description="Generating agency code...")
+            gen = AgencyGenerator(output_base=Path(output))
+            try:
+                output_path = gen.generate(blueprint, overwrite=overwrite)
+            except FileExistsError as e:
+                console.print(f"[bold red]Error:[/bold red] {e}")
+                console.print("Use --overwrite to replace.")
+                sys.exit(1)
+            progress.update(task, description="[green]✓ Agency generated")
+
+            # Package runtime into generated agency
+            progress.update(task, description="Packaging runtime...")
+            import shutil
+            runtime_src = Path(__file__).parent / "runtime"
+            runtime_dst = output_path / "forge" / "runtime"
+            forge_pkg = output_path / "forge"
+            forge_pkg.mkdir(exist_ok=True)
+            (forge_pkg / "__init__.py").write_text('"""Forge runtime — bundled with generated agency."""\n', encoding="utf-8")
+            if runtime_dst.exists():
+                shutil.rmtree(str(runtime_dst))
+            shutil.copytree(str(runtime_src), str(runtime_dst), ignore=shutil.ignore_patterns("__pycache__"))
+            progress.update(task, description="[green]✓ Runtime packaged")
 
         console.print(f"[bold green]✅ Agency generated at {output_path}[/bold green]")
         console.print(f"   Name: {blueprint.name}")
@@ -467,24 +485,24 @@ CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
         click.echo(f"  ✅ Dockerfile created at {dockerfile_path}")
 
     # Build Docker image
-    click.echo(f"\n🔨 Building Docker image: {image_name}")
-    result = subprocess.run(
-        ["docker", "build", "-t", image_name, "."],
-        cwd=str(agency_dir),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        click.secho(f"Build failed:\n{result.stderr}", fg="red")
-        raise SystemExit(1)
-    click.secho(f"  ✅ Image built: {image_name}", fg="green")
+    with console.status(f"[bold cyan]🔨 Building Docker image: {image_name}[/bold cyan]") as status:
+        result = subprocess.run(
+            ["docker", "build", "-t", image_name, "."],
+            cwd=str(agency_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            console.print(f"[bold red]Build failed:[/bold red]\n{result.stderr}")
+            raise SystemExit(1)
+    console.print(f"  [green]✅ Image built: {image_name}[/green]")
 
     if build_only:
         click.echo(f"\nRun manually: docker run -p {port}:{port} -e OPENAI_API_KEY=$OPENAI_API_KEY {image_name}")
         return
 
     # Run container
-    click.echo(f"\n🚀 Starting container: {container_name}")
+    console.print(f"\n[bold cyan]🚀 Starting container: {container_name}[/bold cyan]")
     
     # Stop existing container if running
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
