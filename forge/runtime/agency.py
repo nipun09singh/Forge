@@ -220,7 +220,16 @@ class Agency:
         self._task_count += 1
         if self._task_count % self._evolution_interval == 0 and self._performance_tracker:
             try:
-                await self.self_evolution.run_evolution_cycle()
+                # Collect all agents across teams for evolution
+                all_agents: dict[str, Any] = {}
+                for team in self.teams.values():
+                    if team.lead:
+                        all_agents[team.lead.name] = team.lead
+                    for agent in team.agents:
+                        all_agents[agent.name] = agent
+                for name, agent in self._standalone_agents.items():
+                    all_agents[name] = agent
+                await self.self_evolution.run_evolution_cycle(agents=all_agents)
                 await self.agent_spawner.check_and_spawn(self)
             except Exception as e:
                 logger.debug(f"Self-improvement cycle skipped: {e}")

@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from forge.runtime.tools import Tool, ToolRegistry
 from forge.runtime.memory import SharedMemory
-from forge.runtime.types import LLMClient, ChatMessage, LLMResponse, ToolResult as ToolResultDict, TaskContext
+from forge.runtime.types import LLMClient, LLMResponse, ToolResult as ToolResultDict, TaskContext
 from forge.runtime.improvement import QualityGate, QualityVerdict, ReflectionEngine, PerformanceTracker, TaskMetric
 from forge.runtime.observability import EventLog, TraceContext, EventType, Event
 from forge.runtime.human import HumanApprovalGate, ApprovalRequest, ApprovalResult, ApprovalDecision, Urgency

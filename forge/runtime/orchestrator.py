@@ -27,7 +27,7 @@ from typing import Any
 from forge.runtime.types import LLMClient
 
 from forge.runtime.guardrails import GuardrailsEngine
-from forge.runtime.observability import EventLog, TraceContext
+from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS
 from forge.runtime.structured_outputs import parse_completion_signal
 from forge.runtime.token_manager import TokenCounter
 
@@ -139,6 +139,7 @@ class OrchestratorAgent:
         start_time = time.time()
         files_created: list[str] = []
         total_tokens = 0
+        total_cost = 0.0
 
         logger.info(f"=== ORCHESTRATOR START ===")
         logger.info(f"Task: {task[:100]}")
@@ -258,17 +259,42 @@ class OrchestratorAgent:
                 if tools_schema:
                     kwargs["tools"] = tools_schema
 
+                if self._event_log:
+                    self._event_log.emit_llm_call(
+                        agent_name="orchestrator",
+                        model=self.model,
+                        messages_count=len(conversation),
+                        tools_count=len(tools_schema) if tools_schema else 0,
+                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                    )
+
+                _llm_start = time.time()
                 response = await self._llm_client.chat.completions.create(**kwargs)
+                _llm_duration = (time.time() - _llm_start) * 1000
                 choice = response.choices[0]
 
-                # Track token usage
+                if self._event_log and hasattr(response, 'usage') and response.usage:
+                    self._event_log.emit_llm_response(
+                        agent_name="orchestrator",
+                        model=self.model,
+                        prompt_tokens=getattr(response.usage, 'prompt_tokens', 0) or 0,
+                        completion_tokens=getattr(response.usage, 'completion_tokens', 0) or 0,
+                        has_tool_calls=bool(choice.message.tool_calls),
+                        duration_ms=_llm_duration,
+                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                    )
+
+                # Track token usage and cost using per-model rates
                 if hasattr(response, 'usage') and response.usage:
-                    total_tokens += getattr(response.usage, 'total_tokens', 0)
+                    prompt_tok = getattr(response.usage, 'prompt_tokens', 0) or 0
+                    completion_tok = getattr(response.usage, 'completion_tokens', 0) or 0
+                    total_tokens += prompt_tok + completion_tok
+                    costs = MODEL_COSTS.get(self.model, MODEL_COSTS.get("gpt-4", {"input": 0.03, "output": 0.06}))
+                    total_cost += (prompt_tok / 1000 * costs["input"]) + (completion_tok / 1000 * costs["output"])
 
                 # Check cost budget
-                estimated_cost = total_tokens * 0.00003  # rough estimate ~$30/1M tokens
-                if estimated_cost > self.max_cost_usd:
-                    logger.warning(f"  💰 Cost budget exceeded: ${estimated_cost:.2f} > ${self.max_cost_usd:.2f}")
+                if total_cost > self.max_cost_usd:
+                    logger.warning(f"  💰 Cost budget exceeded: ${total_cost:.4f} > ${self.max_cost_usd:.2f}")
                     break
 
                 # ACT: If tool calls, execute them
@@ -364,6 +390,14 @@ class OrchestratorAgent:
 
                 # OBSERVE: No tool calls — agent produced text response
                 text_output = choice.message.content or ""
+                
+                # Content filtering on output
+                if self._guardrails:
+                    output_violations = self._guardrails.check_output(text_output)
+                    if output_violations:
+                        text_output = self._guardrails.redact_output(text_output)
+                        logger.debug(f"  🛡️ Output filtered: {[v.rule for v in output_violations]}")
+                
                 conversation.append({"role": "assistant", "content": text_output})
 
                 # Check for completion signal (structured JSON or string patterns)
@@ -406,7 +440,11 @@ class OrchestratorAgent:
                         )
                         state_summary = summary_resp.choices[0].message.content or ""
                         if hasattr(summary_resp, 'usage') and summary_resp.usage:
-                            total_tokens += getattr(summary_resp.usage, 'total_tokens', 0)
+                            s_prompt = getattr(summary_resp.usage, 'prompt_tokens', 0) or 0
+                            s_completion = getattr(summary_resp.usage, 'completion_tokens', 0) or 0
+                            total_tokens += s_prompt + s_completion
+                            s_costs = MODEL_COSTS.get(self.model, MODEL_COSTS.get("gpt-4", {"input": 0.03, "output": 0.06}))
+                            total_cost += (s_prompt / 1000 * s_costs["input"]) + (s_completion / 1000 * s_costs["output"])
                         pinned = {"role": "user", "content": f"[PROJECT STATE - iteration {iterations}]: {state_summary}"}
                     except Exception as e:
                         logger.debug(f"State summary generation failed: {e}")
