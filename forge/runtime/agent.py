@@ -19,12 +19,13 @@ from forge.runtime.human import HumanApprovalGate, ApprovalRequest, ApprovalResu
 from forge.runtime.guardrails import GuardrailsEngine
 from forge.runtime.model_router import ModelRouter
 from forge.runtime.primitives import (
-    CriticBase, ScoredCritic, EscalationPolicy,
+    CriticBase, ScoredCritic, EscalationPolicy, EscalationLevel, EscalationStep,
 )
 from forge.runtime.primitives.critics import CriticVerdict
 from forge.runtime.knowledge import DomainKnowledge
 from forge.runtime.structured_outputs import AgentResponse, TaskStatus, parse_agent_response
 from forge.runtime.confidence import ConfidenceScorer, ConfidenceScore, ConfidenceLevel
+from forge.runtime.tool_access import ToolAccessPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,9 @@ class Agent:
         domain_knowledge: DomainKnowledge | None = None,
         tool_timeout_seconds: float = 30.0,
         max_concurrent_tools: int = 5,
+        # Role-based tool access control
+        allowed_tools: list[str] | None = None,
+        denied_tools: list[str] | None = None,
     ):
         self.id = f"agent-{uuid.uuid4().hex[:8]}"
         self.name = name
@@ -124,6 +128,9 @@ class Agent:
         self._escalation_policy = escalation_policy or EscalationPolicy()
         self.domain_knowledge = domain_knowledge
         self._confidence_scorer = ConfidenceScorer()
+        self._tool_access_policy = ToolAccessPolicy()
+        self.allowed_tools = allowed_tools
+        self.denied_tools = denied_tools
 
         if tools:
             for tool in tools:
@@ -169,19 +176,20 @@ class Agent:
 
     async def execute(self, task: str, context: TaskContext | dict[str, Any] | None = None) -> TaskResult:
         """
-        Execute a task using the agent's reasoning loop.
+        Execute a task using the agent's reasoning loop with escalation support.
         
         The agent will:
         1. Receive the task
         2. Reason about what to do
         3. Use tools as needed
         4. Iterate until done or max_iterations reached
+        5. On failure, escalate through configured levels (retry → upgrade model → human → fail)
         """
         if not task or not isinstance(task, str) or not task.strip():
             return TaskResult(success=False, output="Task must be a non-empty string.")
 
         self.status = AgentStatus.WORKING
-        _start_time = time.time()
+        self._exec_start_time = time.time()
         if self._event_log:
             self._event_log.emit(Event(
                 event_type=EventType.AGENT_START,
@@ -212,6 +220,23 @@ class Agent:
                     "content": f"[Memory Context]: {context_summary}"
                 })
 
+        # Reset escalation policy for the new task
+        self._escalation_policy.reset()
+
+        # First attempt
+        result = await self._execute_attempt(task)
+
+        # Escalation loop: on failure, try progressively stronger interventions
+        while not result.success:
+            escalation_result = await self._escalate(task, result.output, context)
+            if escalation_result is None:
+                break
+            result = escalation_result
+
+        return result
+
+    async def _execute_attempt(self, task: str) -> TaskResult:
+        """Core execution loop — one attempt at the task."""
         try:
             for iteration in range(self.max_iterations):
                 # Check cost budget
@@ -260,7 +285,7 @@ class Agent:
                             task_preview=task[:100],
                             success=False,
                             quality_score=0.0,
-                            duration_seconds=time.time() - _start_time,
+                            duration_seconds=time.time() - self._exec_start_time,
                             iterations_used=iteration + 1,
                         ))
                     return TaskResult(success=False, output=structured.content or final_output)
@@ -307,7 +332,7 @@ class Agent:
                         task_preview=task[:100],
                         success=True,
                         quality_score=quality_score,
-                        duration_seconds=time.time() - _start_time,
+                        duration_seconds=time.time() - self._exec_start_time,
                         iterations_used=iteration + 1,
                     ))
 
@@ -345,7 +370,7 @@ class Agent:
                     task_preview=task[:100],
                     success=False,
                     quality_score=0.0,
-                    duration_seconds=time.time() - _start_time,
+                    duration_seconds=time.time() - self._exec_start_time,
                     iterations_used=self.max_iterations,
                 ))
             return TaskResult(
@@ -361,10 +386,145 @@ class Agent:
                     task_preview=task[:100],
                     success=False,
                     quality_score=0.0,
-                    duration_seconds=time.time() - _start_time,
+                    duration_seconds=time.time() - self._exec_start_time,
                     iterations_used=0,
                 ))
             return TaskResult(success=False, output=f"Agent error: {e}")
+
+    async def _escalate(
+        self, task: str, error_context: str,
+        context: TaskContext | dict[str, Any] | None = None,
+    ) -> TaskResult | None:
+        """
+        Handle escalation when task execution fails.
+        
+        Walks through the escalation chain (retry → model upgrade → human → fail).
+        Returns a TaskResult if escalation produces a result, or None if exhausted.
+        """
+        if not self._escalation_policy.should_escalate(success=False):
+            return None
+
+        step = self._escalation_policy.get_next_action()
+        if step is None:
+            return None
+
+        logger.info(
+            f"Agent '{self.name}' escalating: level={step.level.value}"
+        )
+
+        if self._event_log:
+            self._event_log.emit(Event(
+                event_type=EventType.AGENT_START,
+                agent_name=self.name,
+                trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                data={
+                    "escalation_level": step.level.value,
+                    "error_context": error_context[:200],
+                },
+            ))
+
+        if step.level == EscalationLevel.RETRY:
+            # Level 1: Retry with enhanced prompt containing error context
+            self.conversation.append({
+                "role": "user",
+                "content": (
+                    f"Your previous attempt failed with the following error:\n"
+                    f"{error_context}\n\n"
+                    f"Please try a different approach to complete the task."
+                ),
+            })
+            return await self._execute_attempt(task)
+
+        elif step.level == EscalationLevel.DIFFERENT_MODEL:
+            # Level 2: Upgrade to a more capable model and retry
+            original_model = self.model
+            upgraded_model = step.model_override or "gpt-4"
+            logger.info(
+                f"Escalation: upgrading model from '{original_model}' to '{upgraded_model}'"
+            )
+            self.model = upgraded_model
+            self.conversation.append({
+                "role": "user",
+                "content": (
+                    f"Previous attempt failed:\n{error_context}\n\n"
+                    f"Retrying with upgraded model. Please try again."
+                ),
+            })
+            try:
+                return await self._execute_attempt(task)
+            finally:
+                self.model = original_model
+
+        elif step.level == EscalationLevel.HUMAN:
+            # Level 3: Request human intervention
+            return await self._escalate_to_human(task, error_context, step)
+
+        elif step.level == EscalationLevel.DIFFERENT_AGENT:
+            # Level 4: Fail gracefully with full context for agent routing
+            return TaskResult(
+                success=False,
+                output=(
+                    f"Task failed after escalation to different_agent level. "
+                    f"Last error: {error_context}"
+                ),
+                data={
+                    "escalation_exhausted": True,
+                    "escalation_level": step.level.value,
+                    "error_context": error_context,
+                },
+            )
+
+        return None
+
+    async def _escalate_to_human(
+        self, task: str, error_context: str, step: EscalationStep,
+    ) -> TaskResult:
+        """Escalate to human review via the approval gate."""
+        if self._approval_gate:
+            try:
+                approval = await self._approval_gate.approve(ApprovalRequest(
+                    agent_name=self.name,
+                    action_description=(
+                        f"Agent '{self.name}' failed and is requesting human guidance.\n"
+                        f"Task: {task[:200]}\n"
+                        f"Error: {error_context[:300]}"
+                    ),
+                    action_type="escalation",
+                    urgency=Urgency.HIGH,
+                    context={
+                        "task": task,
+                        "error": error_context,
+                        "escalation_level": step.level.value,
+                    },
+                ))
+
+                if approval.decision == ApprovalDecision.APPROVED and approval.feedback:
+                    self.conversation.append({
+                        "role": "user",
+                        "content": (
+                            f"Human reviewer provided guidance:\n{approval.feedback}\n\n"
+                            f"Please retry the task using this guidance."
+                        ),
+                    })
+                    return await self._execute_attempt(task)
+                elif approval.decision == ApprovalDecision.REJECTED:
+                    return TaskResult(
+                        success=False,
+                        output=f"Human rejected escalation: {approval.feedback}",
+                        data={"escalation_level": "human", "human_rejected": True},
+                    )
+            except Exception as e:
+                logger.warning(f"Human escalation failed: {e}")
+
+        return TaskResult(
+            success=False,
+            output=f"Task requires human intervention. Error: {error_context}",
+            data={
+                "escalation_level": "human",
+                "needs_human": True,
+                "error_context": error_context,
+            },
+        )
 
     async def _call_llm(self) -> LLMResponse:
         """Call the LLM with current conversation and available tools."""
@@ -457,6 +617,21 @@ class Agent:
             blocked = [v for v in violations if v.severity == "block"]
             if blocked:
                 return {"id": tc["id"], "output": f"Blocked by guardrails: {blocked[0].description}"}
+
+        # Role-based tool access check
+        if not self._tool_access_policy.is_allowed(
+            self.role,
+            fn_name,
+            allowed_tools=self.allowed_tools,
+            denied_tools=self.denied_tools,
+        ):
+            logger.warning(
+                "Tool '%s' denied for agent '%s' (role=%s)", fn_name, self.name, self.role,
+            )
+            return {
+                "id": tc["id"],
+                "output": f"Tool access denied: '{fn_name}' is not permitted for role '{self.role}'",
+            }
 
         tool = self.tool_registry.get(fn_name)
         if not tool:

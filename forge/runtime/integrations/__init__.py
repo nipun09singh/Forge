@@ -48,12 +48,20 @@ class BuiltinToolkit:
         return tools
 
     @staticmethod
-    def primitives(sandbox_dir: str = "./workspace", db_path: str = "./data/agency.db") -> list:
-        """Get the 5 primitive tools — the HANDS of the autonomous founder.
-        
-        These are sufficient to build anything:
+    def primitives(
+        sandbox_dir: str = "./workspace",
+        db_path: str = "./data/agency.db",
+        role: str | None = None,
+    ) -> list:
+        """Get primitive tools, optionally filtered by agent role.
+
+        When *role* is ``None`` (default), all 5 primitives are returned for
+        backward compatibility.  When a role is given, ``run_command`` is only
+        included for ``"developer"`` and ``"admin"`` roles.
+
+        Primitives:
         - read_write_file: Create, read, edit any file
-        - run_command: Execute any shell command
+        - run_command: Execute any shell command (developer/admin only)
         - http_request: Call any API
         - web_search: Search the internet
         - browse_web: Read any web page
@@ -63,10 +71,35 @@ class BuiltinToolkit:
         from forge.runtime.integrations.http_tool import create_http_tool
         from forge.runtime.integrations.search_tool import create_search_tool
         from forge.runtime.integrations.browser_tool import create_browser_tool
-        
+
+        tools = [
+            create_file_tool(sandbox_dir=sandbox_dir),
+            create_http_tool(),
+            create_search_tool(),
+            create_browser_tool(),
+        ]
+
+        # Only include command_tool for privileged roles (or when no role specified)
+        _command_roles = {"developer", "admin"}
+        if role is None or role.strip().lower() in _command_roles:
+            tools.insert(1, create_command_tool())
+
+        return tools
+
+    @staticmethod
+    def safe_tools(sandbox_dir: str = "./workspace") -> list:
+        """Return primitive tools WITHOUT command execution.
+
+        Intended for non-technical roles (support, analyst, etc.) where shell
+        access is unnecessary and potentially dangerous.
+        """
+        from forge.runtime.integrations.file_tool import create_file_tool
+        from forge.runtime.integrations.http_tool import create_http_tool
+        from forge.runtime.integrations.search_tool import create_search_tool
+        from forge.runtime.integrations.browser_tool import create_browser_tool
+
         return [
             create_file_tool(sandbox_dir=sandbox_dir),
-            create_command_tool(),
             create_http_tool(),
             create_search_tool(),
             create_browser_tool(),
