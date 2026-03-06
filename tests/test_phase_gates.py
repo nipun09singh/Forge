@@ -284,6 +284,112 @@ class TestPhaseInstruction:
         assert "TEST" in instr or "test" in instr
 
 
+class TestToolBlocking:
+    """Tests for is_tool_allowed phase enforcement."""
+
+    def test_run_command_blocked_in_research(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        allowed, reason = e.is_tool_allowed("run_command")
+        assert allowed is False
+        assert "RESEARCH" in reason
+
+    def test_git_blocked_in_research(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        allowed, _ = e.is_tool_allowed("git_operation")
+        assert allowed is False
+
+    def test_query_database_blocked_in_research(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        allowed, _ = e.is_tool_allowed("query_database")
+        assert allowed is False
+
+    def test_browse_web_allowed_in_research(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        allowed, _ = e.is_tool_allowed("browse_web")
+        assert allowed is True
+
+    def test_web_search_allowed_in_research(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        allowed, _ = e.is_tool_allowed("web_search")
+        assert allowed is True
+
+    def test_read_write_file_allowed_in_research(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        allowed, _ = e.is_tool_allowed("read_write_file")
+        assert allowed is True
+
+    def test_all_tools_allowed_in_build(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        e.record_tool_use("browse_web")
+        e.tick()
+        e.tick()
+        assert e.current_phase == Phase.BUILD
+        allowed, _ = e.is_tool_allowed("run_command")
+        assert allowed is True
+        allowed, _ = e.is_tool_allowed("git_operation")
+        assert allowed is True
+
+
+class TestAntiSpoofing:
+    """Tests that simple echo/fake commands don't defeat test gates."""
+
+    def _enter_test(self, e):
+        e.record_tool_use("browse_web")
+        e.tick()
+        e.tick()
+        e.record_file_created("main.py")
+        e.record_file_created("test_main.py")
+        e.tick()
+        assert e.current_phase == Phase.TEST
+
+    def test_echo_passed_does_not_count(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output('echo "passed"', 'passed')
+        assert e._phases[Phase.TEST].tests_run is False
+
+    def test_echo_without_pytest_keyword_does_not_count(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output('echo "all tests passed"', 'all tests passed')
+        # echo without pytest/unittest keyword is not a test command
+        assert e._phases[Phase.TEST].tests_run is False
+
+    def test_real_pytest_counts(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output("pytest tests/", "====== 5 passed in 1.2s ======")
+        assert e._phases[Phase.TEST].tests_run is True
+        assert e._phases[Phase.TEST].test_passed is True
+
+    def test_real_pytest_failure_detected(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output("pytest tests/", "2 passed, 1 FAILED")
+        assert e._phases[Phase.TEST].tests_run is True
+        assert e._phases[Phase.TEST].test_passed is False
+
+    def test_python_m_pytest_counts(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output("python -m pytest", "10 passed, 0 warnings")
+        assert e._phases[Phase.TEST].tests_run is True
+        assert e._phases[Phase.TEST].test_passed is True
+
+    def test_unittest_counts(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output("python -m unittest discover", "OK")
+        assert e._phases[Phase.TEST].tests_run is True
+        assert e._phases[Phase.TEST].test_passed is True
+
+    def test_random_command_not_test(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_test(e)
+        e.record_command_output("python main.py", "Application started successfully")
+        assert e._phases[Phase.TEST].tests_run is False
+
+
 class TestSummary:
     def test_summary_structure(self):
         e = PhaseGateEnforcer("/tmp/test")

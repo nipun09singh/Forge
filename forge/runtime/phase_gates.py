@@ -116,15 +116,48 @@ class PhaseGateEnforcer:
         if tool_name == "run_command":
             self._phases[Phase.TEST].tools_used.add(tool_name)
 
+    def is_tool_allowed(self, tool_name: str) -> tuple[bool, str]:
+        """Check if a tool is appropriate for the current phase.
+        
+        Returns (allowed, reason). Blocks tools that would skip phases:
+        - RESEARCH: only browse_web, web_search, read_write_file (for notes)
+        - BUILD: no restrictions (needs all tools to create project)
+        - TEST: no restrictions (needs run_command for tests)
+        - VERIFY: no restrictions
+        """
+        if self._current_phase == Phase.RESEARCH:
+            # During research, block build-only tools to enforce actual research
+            blocked_in_research = {"run_command", "git_operation", "query_database"}
+            if tool_name in blocked_in_research:
+                return False, f"Tool '{tool_name}' not allowed during RESEARCH phase. Use browse_web or web_search to research first."
+        return True, ""
+
     def record_command_output(self, command: str, output: str) -> None:
-        """Record command execution to detect test runs."""
-        test_indicators = ["pytest", "unittest", "test_", "tests/", "PASSED", "FAILED", "passed", "failed"]
-        if any(indicator in command or indicator in output for indicator in test_indicators):
-            self._phases[Phase.TEST].tests_run = True
-            # Check if tests passed
-            fail_indicators = ["FAILED", "ERRORS", "Error", "failure"]
-            if not any(f in output for f in fail_indicators):
-                self._phases[Phase.TEST].test_passed = True
+        """Record command execution to detect test runs.
+        
+        Uses strict matching: command must contain pytest/unittest to count.
+        Simple 'echo passed' does not satisfy the test gate.
+        """
+        # Require actual test framework command — not just 'passed' in output
+        test_commands = ["pytest", "python -m pytest", "python -m unittest", "unittest"]
+        is_test_command = any(tc in command for tc in test_commands)
+        
+        if not is_test_command:
+            return  # Not a real test run
+        
+        self._phases[Phase.TEST].tests_run = True
+        
+        # Parse test results — require explicit pass pattern from test framework
+        fail_indicators = ["FAILED", "ERRORS", "errors=", "failures="]
+        pass_indicators = ["passed", "OK"]
+        
+        has_failures = any(f in output for f in fail_indicators)
+        has_passes = any(p in output for p in pass_indicators)
+        
+        if has_passes and not has_failures:
+            self._phases[Phase.TEST].test_passed = True
+        else:
+            self._phases[Phase.TEST].test_passed = False
 
     def record_file_created(self, filepath: str) -> None:
         """Record a file creation."""

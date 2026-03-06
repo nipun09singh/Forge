@@ -328,6 +328,16 @@ class OrchestratorAgent:
 
                         tool = self._tool_map.get(fn_name)
 
+                        # Phase gate check — block wrong-phase tools
+                        allowed, phase_reason = phase_enforcer.is_tool_allowed(fn_name)
+                        if not allowed:
+                            conversation.append({
+                                "role": "tool",
+                                "content": f"⛔ Phase gate: {phase_reason}",
+                                "tool_call_id": tc.id,
+                            })
+                            continue
+
                         # Guardrails check
                         if self._guardrails:
                             violations = self._guardrails.check_tool_call(fn_name, args)

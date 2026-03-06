@@ -493,7 +493,11 @@ CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
         "-p", f"{port}:{port}",
     ]
     # Pass secrets via env-file to avoid leaking in ps aux
-    env_file = agency_dir / ".env.deploy"
+    import tempfile
+    import stat
+    env_fd, env_file_path = tempfile.mkstemp(prefix=".forge-env-", suffix=".env")
+    env_file = Path(env_file_path)
+    os.close(env_fd)  # Close fd, we'll write via Path
     env_lines = []
     for key in ("OPENAI_API_KEY", "AGENCY_API_KEY"):
         val = os.environ.get(key, "")
@@ -501,34 +505,36 @@ CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
             env_lines.append(f"{key}={val}")
     if env_lines:
         env_file.write_text("\n".join(env_lines) + "\n")
+        os.chmod(env_file_path, stat.S_IRUSR | stat.S_IWUSR)  # 600
         run_cmd.extend(["--env-file", str(env_file)])
     if detach:
         run_cmd.append("-d")
     run_cmd.append(image_name)
 
-    if detach:
-        result = subprocess.run(run_cmd, capture_output=True, text=True)
-        if env_file.exists():
-            env_file.unlink()  # Clean up secrets file
-        if result.returncode != 0:
-            click.secho(f"Failed to start: {result.stderr}", fg="red")
-            raise SystemExit(1)
-        click.echo()
-        click.secho(f"  ✅ Agency deployed!", fg="green", bold=True)
-        click.echo(f"\n  🌐 API:        http://localhost:{port}")
-        click.echo(f"  📋 Health:     http://localhost:{port}/health")
-        click.echo(f"  📊 Status:     http://localhost:{port}/api/status")
-        click.echo(f"  📡 Events:     http://localhost:{port}/api/events")
-        click.echo(f"\n  Stop:  docker stop {container_name}")
-        click.echo(f"  Logs:  docker logs -f {container_name}")
-    else:
-        click.echo(f"\n  🌐 Starting on http://localhost:{port}")
-        click.echo(f"  Press Ctrl+C to stop\n")
-        try:
+    try:
+        if detach:
+            result = subprocess.run(run_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                click.secho(f"Failed to start: {result.stderr}", fg="red")
+                raise SystemExit(1)
+            click.echo()
+            click.secho(f"  ✅ Agency deployed!", fg="green", bold=True)
+            click.echo(f"\n  🌐 API:        http://localhost:{port}")
+            click.echo(f"  📋 Health:     http://localhost:{port}/health")
+            click.echo(f"  📊 Status:     http://localhost:{port}/api/status")
+            click.echo(f"  📡 Events:     http://localhost:{port}/api/events")
+            click.echo(f"\n  Stop:  docker stop {container_name}")
+            click.echo(f"  Logs:  docker logs -f {container_name}")
+        else:
+            click.echo(f"\n  🌐 Starting on http://localhost:{port}")
+            click.echo(f"  Press Ctrl+C to stop\n")
             subprocess.run(run_cmd)
-        finally:
+    finally:
+        try:
             if env_file.exists():
-                env_file.unlink()  # Clean up secrets file
+                env_file.unlink()
+        except OSError:
+            pass  # Best-effort cleanup
 
 
 @main.command()

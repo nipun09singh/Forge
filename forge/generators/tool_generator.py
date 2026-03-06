@@ -24,6 +24,9 @@ BUILTIN_TOOL_MAP = {
     "git_operation": "from forge.runtime.integrations.git_tool import create_git_tool\n\n{name}_tool = create_git_tool()",
     "browse_web": "from forge.runtime.integrations.browser_tool import create_browser_tool\n\n{name}_tool = create_browser_tool()",
     "web_search": "from forge.runtime.integrations.search_tool import create_search_tool\n\n{name}_tool = create_search_tool()",
+    "send_sms": "from forge.runtime.integrations.twilio_tool import create_twilio_tool\n\n{name}_tool = create_twilio_tool()",
+    "stripe_payment": "from forge.runtime.integrations.stripe_tool import create_stripe_tool\n\n{name}_tool = create_stripe_tool()",
+    "calendar": "from forge.runtime.integrations.calendar_tool import create_calendar_tool\n\n{name}_tool = create_calendar_tool()",
 }
 
 # Exact matching: known aliases → built-in tools
@@ -57,6 +60,18 @@ BUILTIN_PATTERN_MAP = {
     "read_url": "browse_web",
     "search_web": "web_search",
     "internet_search": "web_search",
+    "send_sms": "send_sms",
+    "sms": "send_sms",
+    "text_message": "send_sms",
+    "twilio": "send_sms",
+    "stripe_payment": "stripe_payment",
+    "payment": "stripe_payment",
+    "charge": "stripe_payment",
+    "billing": "stripe_payment",
+    "calendar": "calendar",
+    "schedule": "calendar",
+    "booking": "calendar",
+    "appointment": "calendar",
 }
 
 

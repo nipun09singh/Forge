@@ -9,6 +9,9 @@ from forge.runtime.integrations.command_tool import create_command_tool
 from forge.runtime.integrations.git_tool import create_git_tool
 from forge.runtime.integrations.browser_tool import create_browser_tool
 from forge.runtime.integrations.search_tool import create_search_tool
+from forge.runtime.integrations.twilio_tool import create_twilio_tool
+from forge.runtime.integrations.stripe_tool import create_stripe_tool
+from forge.runtime.integrations.calendar_tool import create_calendar_tool
 from forge.runtime.tools import Tool
 
 
@@ -39,12 +42,15 @@ class BuiltinToolkit:
         tools.append(create_git_tool())
         tools.append(create_browser_tool())
         tools.append(create_search_tool())
+        tools.append(create_twilio_tool())
+        tools.append(create_stripe_tool())
+        tools.append(create_calendar_tool())
         return tools
 
     @staticmethod
     def get_tool_names(include_email: bool = True) -> list[str]:
         """Get names of all available built-in tools."""
-        names = ["http_request", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web", "web_search"]
+        names = ["http_request", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web", "web_search", "send_sms", "stripe_payment", "calendar"]
         if include_email:
             names.append("send_email")
         return names
