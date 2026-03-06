@@ -249,12 +249,13 @@ class TestMutationRollback:
         evo = SelfEvolution(None, None, llm_client=None)
         assert hasattr(evo, 'rollback_mutation')
 
-    def test_rollback_returns_false_without_tracker(self):
+    @pytest.mark.asyncio
+    async def test_rollback_returns_false_without_tracker(self):
         evo = SelfEvolution(None, None, llm_client=None)
         agent = Agent(name="Test", role="test", system_prompt="test")
         record = EvolutionRecord(target_agent="Test", change_type="model_downgrade",
                                  description="test", before_score=0.9, after_score=0.9, applied=True)
-        assert evo.rollback_mutation(agent, record) is False
+        assert await evo.rollback_mutation(agent, record) is False
 
 
 def _mock_llm_response(content: str) -> MagicMock:
@@ -441,3 +442,115 @@ class TestPromptOptimizerCompile:
         result = await optimizer.compile(agent, n_candidates=2, min_samples=5)
         assert not result.improved
         assert agent.system_prompt == original
+
+
+class TestRollbackWiring:
+    """Tests that rollback_mutation is wired into the evolution cycle and works correctly."""
+
+    def _make_agent(self, name="TestAgent", model="gpt-4", temperature=0.5,
+                    enable_reflection=False, max_iterations=20):
+        agent = Agent(name=name, role="test", system_prompt="Test agent")
+        agent.model = model
+        agent.temperature = temperature
+        agent.enable_reflection = enable_reflection
+        agent.max_iterations = max_iterations
+        return agent
+
+    def _make_tracker_for_agent(self, agent_name, success_rate=0.9, quality=0.8, count=10):
+        tracker = PerformanceTracker()
+        successes = int(count * success_rate)
+        failures = count - successes
+        for i in range(successes):
+            tracker.record(TaskMetric(
+                agent_name=agent_name, task_preview=f"task_{i}",
+                success=True, quality_score=quality, duration_seconds=5.0,
+            ))
+        for i in range(failures):
+            tracker.record(TaskMetric(
+                agent_name=agent_name, task_preview=f"fail_{i}",
+                success=False, quality_score=0.0, duration_seconds=10.0,
+            ))
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_rollback_called_after_deep_mutations(self):
+        """rollback_mutation IS called after deep mutations are applied."""
+        agent = self._make_agent(model="gpt-4")
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+
+        with patch.object(evo, 'rollback_mutation', new_callable=AsyncMock, return_value=False) as mock_rollback:
+            records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
+            # Deep mutation should have triggered a model_downgrade, so rollback_mutation should be called
+            assert mock_rollback.call_count > 0
+            # Verify it was called with the agent and a mutation record
+            call_args = mock_rollback.call_args
+            assert call_args[0][0] is agent
+            assert call_args[0][1].change_type in {"model_downgrade", "temperature_decrease", "temperature_increase", "enable_reflection", "increase_iterations"}
+
+    @pytest.mark.asyncio
+    async def test_rollback_restores_on_performance_drop(self):
+        """rollback_mutation restores agent state when performance drops >10%."""
+        agent = self._make_agent(model="gpt-4o-mini")
+        # Tracker shows current performance at 0.7 (dropped from 0.9)
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=0.7, quality=0.7, count=10)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=AsyncMock())
+        record = EvolutionRecord(
+            target_agent="TestAgent", change_type="model_downgrade",
+            description="Downgraded model", before_score=0.9, after_score=0.9, applied=True,
+        )
+
+        # current_success (0.7) < before_score (0.9) - 0.1 = 0.8 → rollback
+        result = await evo.rollback_mutation(agent, record)
+        assert result is True
+        assert agent.model == "gpt-4o"  # restored to more expensive model
+
+    @pytest.mark.asyncio
+    async def test_rollback_no_restore_when_performance_holds(self):
+        """rollback_mutation does NOT restore when performance holds."""
+        agent = self._make_agent(model="gpt-4o-mini")
+        # Tracker shows current performance at 0.85 (only slight drop from 0.9)
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=0.85, quality=0.85, count=20)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=AsyncMock())
+        record = EvolutionRecord(
+            target_agent="TestAgent", change_type="model_downgrade",
+            description="Downgraded model", before_score=0.9, after_score=0.9, applied=True,
+        )
+
+        # current_success (0.85) < before_score (0.9) - 0.1 = 0.8 → False, no rollback
+        result = await evo.rollback_mutation(agent, record)
+        assert result is False
+        assert agent.model == "gpt-4o-mini"  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_no_auto_improvement_in_prompts_after_evolution(self):
+        """Prompt-append path is REMOVED — no [Auto-improvement] text after evolution."""
+        tracker = _make_tracker_with_data(successes=8, failures=2)
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = json.dumps({"improvements": [{
+            "target_agent": "TestAgent",
+            "issue": "Low quality",
+            "improved_prompt_addition": "Always verify your work thoroughly.",
+            "expected_impact": "Better quality",
+        }]})
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
+        agent.set_llm_client(client)
+        await evo.run_evolution_cycle(agents={"TestAgent": agent})
+
+        # The old prompt-append path should be gone
+        assert "[Auto-improvement]" not in agent.system_prompt

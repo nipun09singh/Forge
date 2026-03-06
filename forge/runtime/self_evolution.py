@@ -242,125 +242,6 @@ class SelfEvolution:
             logger.info("Not enough data for evolution (need 5+ tasks)")
             return records
 
-        # 2. HYPOTHESIZE: Ask LLM to identify improvements
-        analysis_prompt = (
-            "You are an AI performance analyst. Analyze this agency's performance data "
-            "and identify specific, actionable improvements.\n\n"
-            f"Agency Stats:\n{json.dumps(agency_stats, indent=2, default=str)}\n\n"
-            f"Recent Failures:\n{json.dumps(failures, indent=2, default=str)}\n\n"
-            "For each improvement, provide:\n"
-            "1. target_agent: which agent to improve\n"
-            "2. issue: what's wrong\n"
-            "3. improved_prompt_addition: specific text to ADD to the agent's system prompt\n"
-            "4. expected_impact: what will improve\n\n"
-            "Return JSON: {\"improvements\": [{\"target_agent\": \"...\", \"issue\": \"...\", "
-            "\"improved_prompt_addition\": \"...\", \"expected_impact\": \"...\"}]}\n"
-            "Limit to 3 most impactful improvements."
-        )
-
-        try:
-            response = await self._llm_client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": analysis_prompt}],
-                temperature=0.3,
-            )
-            content = response.choices[0].message.content or "{}"
-            
-            # Strip markdown if present
-            if content.strip().startswith("```"):
-                content = content.split("\n", 1)[1] if "\n" in content else content[3:]
-                if content.strip().endswith("```"):
-                    content = content.strip()[:-3]
-            
-            data = json.loads(content)
-            improvements = data.get("improvements", [])
-        except Exception as e:
-            logger.error(f"Evolution analysis failed: {e}")
-            return records
-
-        # 3. EXPERIMENT & DEPLOY: Apply improvements with testing and rollback
-        for imp in improvements[:self.max_evolutions]:
-            agent_name = imp.get("target_agent", "")
-            addition = imp.get("improved_prompt_addition", "")
-            issue = imp.get("issue", "")
-
-            if not agent_name or not addition:
-                continue
-
-            record = EvolutionRecord(
-                target_agent=agent_name,
-                change_type="prompt_update",
-                description=f"Fix: {issue}. Added: {addition[:100]}",
-            )
-
-            if agents and agent_name in agents:
-                agent = agents[agent_name]
-                old_prompt = agent.system_prompt
-                
-                # Get a failing task to test against
-                test_task = None
-                if self._tracker:
-                    failures = self._tracker.get_failure_patterns(limit=10)
-                    agent_failures = [f for f in failures if f.get("agent") == agent_name]
-                    if agent_failures:
-                        test_task = agent_failures[0].get("task", "")
-                
-                # Apply improvement
-                agent.system_prompt = old_prompt + f"\n\n[Auto-improvement]: {addition}"
-                
-                # Test with a REAL failing task (not just "do you understand?")
-                test_passed = True
-                if test_task and agent._llm_client:
-                    try:
-                        test_result = await agent.execute(test_task[:200])
-                        record.after_score = 1.0 if test_result.success else 0.0
-                        test_passed = test_result.success
-                    except Exception:
-                        test_passed = False
-                        record.after_score = 0.0
-                elif agent._llm_client:
-                    # Fallback: basic sanity check
-                    try:
-                        test_result = await agent.execute("Briefly confirm you understand your role.")
-                        test_passed = test_result.success
-                        record.after_score = 1.0 if test_passed else 0.0
-                    except Exception:
-                        test_passed = False
-                        record.after_score = 0.0
-                
-                if test_passed:
-                    record.applied = True
-                    logger.info(f"  ✅ Applied improvement to {agent_name}: {issue[:60]}")
-                else:
-                    # ROLLBACK
-                    agent.system_prompt = old_prompt
-                    record.applied = False
-                    logger.warning(f"  ↩️ Rolled back improvement for {agent_name}: test failed")
-            
-            # Store in memory
-            if self._memory:
-                self._memory.store(
-                    f"evolution:{record.id}",
-                    {
-                        "agent": agent_name,
-                        "issue": issue,
-                        "improvement": addition,
-                        "applied": record.applied,
-                        "cycle": self._cycle_count,
-                    },
-                    author="self_evolution",
-                    tags=["evolution", "improvement"],
-                )
-
-            records.append(record)
-            self._history.append(record)
-
-        # Auto-cleanup prompt bloat
-        if agents:
-            cleaned = self.cleanup_prompt_bloat(agents)
-            if cleaned > 0:
-                logger.info(f"  Cleaned up {cleaned} old improvement blocks")
-
         # === DSPy-style prompt compilation ===
         if agents and self._llm_client:
             optimizer = PromptOptimizer(self._llm_client, self._tracker)
@@ -486,6 +367,17 @@ class SelfEvolution:
                         applied=True,
                     ))
 
+        # After applying deep mutations, schedule a rollback check
+        mutation_types = {"model_downgrade", "temperature_decrease", "temperature_increase", "enable_reflection", "increase_iterations"}
+        mutation_records = [r for r in records if r.change_type in mutation_types]
+        for record in mutation_records:
+            agent_name = record.target_agent
+            if agent_name in agents:
+                agent = agents[agent_name]
+                rolled_back = await self.rollback_mutation(agent, record)
+                if rolled_back:
+                    logger.info(f"Rolled back {record.change_type} for {agent_name}")
+
         logger.info(f"Evolution cycle {self._cycle_count} complete: {len(records)} improvements applied")
         return records
 
@@ -542,7 +434,7 @@ class SelfEvolution:
                     cleaned += blocks - len(kept)
         return cleaned
 
-    def rollback_mutation(self, agent: Any, mutation_record: EvolutionRecord) -> bool:
+    async def rollback_mutation(self, agent: Any, mutation_record: EvolutionRecord) -> bool:
         """Rollback a specific mutation if performance degraded.
         
         Checks post-mutation performance against pre-mutation baseline.
@@ -556,7 +448,7 @@ class SelfEvolution:
         if not stats:
             return False
         
-        current_success = stats.get("success_rate", stats.get("tasks", {}).get("success_rate", 1.0))
+        current_success = stats.get("success_rate", 1.0)
         before_score = mutation_record.before_score
         
         # Rollback if performance dropped by more than 10%
