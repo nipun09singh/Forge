@@ -61,6 +61,7 @@ class ForgeEngine:
         self,
         domain_description: str,
         overwrite: bool = False,
+        inject_archetypes_flag: bool = True,
     ) -> tuple[AgencyBlueprint, Path]:
         """
         Create a complete AI agency from a domain description.
@@ -94,10 +95,13 @@ class ForgeEngine:
                     raise RuntimeError(f"Agency generation failed after retry: {e2}") from e
             progress.update(task, description="[green]✓ Blueprint drafted")
 
-            # Phase 2: Inject universal archetypes (QA, Intake, Self-Improvement, Analytics)
-            progress.update(task, description="Injecting universal agent archetypes...")
-            blueprint = inject_archetypes(blueprint)
-            progress.update(task, description="[green]✓ Universal archetypes injected")
+            # Phase 2: Inject universal archetypes (optional — founder mode skips this)
+            if inject_archetypes_flag:
+                progress.update(task, description="Injecting universal agent archetypes...")
+                blueprint = inject_archetypes(blueprint)
+                progress.update(task, description="[green]✓ Universal archetypes injected")
+            else:
+                progress.update(task, description="[cyan]⚡ Founder mode: AI decides agents (no archetype injection)")
 
             # Phase 3: Critique & Refinement Loop — iterate until quality standards are met
             progress.update(task, description="Running critique & refinement loop...")

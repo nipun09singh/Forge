@@ -85,6 +85,7 @@ class OrchestratorAgent:
         self.max_cost_usd = max_cost_usd
         self._tools: list[Any] = []
         self._tool_map: dict[str, Any] = {}
+        self._tool_library: dict = {}
         self._event_log: EventLog | None = None
         self._trace_ctx: TraceContext | None = None
         self._guardrails: GuardrailsEngine | None = None
@@ -103,15 +104,23 @@ class OrchestratorAgent:
         self._guardrails = guardrails
 
     def _ensure_tools(self) -> None:
-        """Load all primitive tools."""
+        """Load primitive tools. The AI can pull integrations from the library when needed."""
         if self._tools:
             return
         try:
             from forge.runtime.integrations import BuiltinToolkit
-            self._tools = BuiltinToolkit.all_tools()
+            # Start with 5 primitives — the AI builds/discovers everything else
+            self._tools = BuiltinToolkit.primitives()
+            # Also load git and sql as they're useful infrastructure
+            for infra_tool in ["git_operation", "query_database"]:
+                tool = BuiltinToolkit.get_tool(infra_tool)
+                if tool:
+                    self._tools.append(tool)
             self._tool_map = {t.name: t for t in self._tools}
+            self._tool_library = BuiltinToolkit.library()
         except ImportError:
             logger.warning("BuiltinToolkit not available")
+            self._tool_library = {}
 
     def _get_tools_schema(self) -> list[dict]:
         """Get OpenAI function-calling schema for all tools."""

@@ -80,7 +80,8 @@ def main():
 @click.option("--api-key", envvar="OPENAI_API_KEY", help="OpenAI API key")
 @click.option("--base-url", envvar="OPENAI_BASE_URL", help="OpenAI-compatible API base URL")
 @click.option("--pack", "-p", type=click.Choice(["saas_support", "ecommerce", "real_estate"]), help="Use a pre-built domain pack (no API key needed)")
-def create(domain, file, output, model, overwrite, api_key, base_url, pack):
+@click.option("--founder-mode", is_flag=True, help="Founder mode: let the AI decide agents instead of injecting mandatory archetypes")
+def create(domain, file, output, model, overwrite, api_key, base_url, pack, founder_mode):
     """Create a new AI agency from a domain description.
     
     Provide a domain description as an argument or via --file.
@@ -155,7 +156,7 @@ def create(domain, file, output, model, overwrite, api_key, base_url, pack):
     )
 
     try:
-        blueprint, output_path = run_async(engine.create_agency(domain_text, overwrite=overwrite))
+        blueprint, output_path = run_async(engine.create_agency(domain_text, overwrite=overwrite, inject_archetypes_flag=not founder_mode))
     except FileExistsError as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         console.print("Use --overwrite to replace the existing agency.")

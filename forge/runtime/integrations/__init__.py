@@ -48,6 +48,109 @@ class BuiltinToolkit:
         return tools
 
     @staticmethod
+    def primitives(sandbox_dir: str = "./workspace", db_path: str = "./data/agency.db") -> list:
+        """Get the 5 primitive tools — the HANDS of the autonomous founder.
+        
+        These are sufficient to build anything:
+        - read_write_file: Create, read, edit any file
+        - run_command: Execute any shell command
+        - http_request: Call any API
+        - web_search: Search the internet
+        - browse_web: Read any web page
+        """
+        from forge.runtime.integrations.file_tool import create_file_tool
+        from forge.runtime.integrations.command_tool import create_command_tool
+        from forge.runtime.integrations.http_tool import create_http_tool
+        from forge.runtime.integrations.search_tool import create_search_tool
+        from forge.runtime.integrations.browser_tool import create_browser_tool
+        
+        return [
+            create_file_tool(sandbox_dir=sandbox_dir),
+            create_command_tool(),
+            create_http_tool(),
+            create_search_tool(),
+            create_browser_tool(),
+        ]
+
+    @staticmethod
+    def library() -> dict:
+        """Get the integration tool library — available tools the AI can choose to use.
+        
+        Returns a registry of tool factories (not instantiated tools) with metadata,
+        so the orchestrator can discover and load integrations on demand.
+        
+        Usage:
+            lib = BuiltinToolkit.library()
+            if "send_sms" in lib:
+                sms_tool = lib["send_sms"]["create"]()
+        """
+        from forge.runtime.integrations.email_tool import create_email_tool
+        from forge.runtime.integrations.webhook_tool import create_webhook_tool
+        from forge.runtime.integrations.git_tool import create_git_tool
+        from forge.runtime.integrations.sql_tool import create_sql_tool
+        from forge.runtime.integrations.twilio_tool import create_twilio_tool
+        from forge.runtime.integrations.stripe_tool import create_stripe_tool
+        from forge.runtime.integrations.calendar_tool import create_calendar_tool
+        
+        return {
+            "send_email": {
+                "create": create_email_tool,
+                "description": "Send emails via SMTP",
+                "category": "communication",
+                "env_vars": ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"],
+            },
+            "send_webhook": {
+                "create": create_webhook_tool,
+                "description": "Send HTTP webhooks to external services",
+                "category": "integration",
+                "env_vars": [],
+            },
+            "git_operation": {
+                "create": create_git_tool,
+                "description": "Git version control operations",
+                "category": "devops",
+                "env_vars": [],
+            },
+            "query_database": {
+                "create": lambda **kw: create_sql_tool(**kw),
+                "description": "Query SQLite databases",
+                "category": "data",
+                "env_vars": [],
+            },
+            "send_sms": {
+                "create": create_twilio_tool,
+                "description": "Send SMS via Twilio API (mock mode if unconfigured)",
+                "category": "communication",
+                "env_vars": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
+            },
+            "stripe_payment": {
+                "create": create_stripe_tool,
+                "description": "Process payments via Stripe (mock mode if unconfigured)",
+                "category": "payments",
+                "env_vars": ["STRIPE_API_KEY"],
+            },
+            "calendar": {
+                "create": create_calendar_tool,
+                "description": "Manage calendar events via Google Calendar (mock mode if unconfigured)",
+                "category": "scheduling",
+                "env_vars": ["GOOGLE_CALENDAR_API_KEY"],
+            },
+        }
+
+    @staticmethod
+    def get_tool(name: str, **kwargs) -> "Tool | None":
+        """Lazy-load a specific integration tool by name.
+        
+        Returns None if the tool doesn't exist in the library.
+        The AI can use this to pull integrations when its research tells it to.
+        """
+        lib = BuiltinToolkit.library()
+        entry = lib.get(name)
+        if entry:
+            return entry["create"](**kwargs)
+        return None
+
+    @staticmethod
     def get_tool_names(include_email: bool = True) -> list[str]:
         """Get names of all available built-in tools."""
         names = ["http_request", "query_database", "read_write_file", "send_webhook", "run_command", "git_operation", "browse_web", "web_search", "send_sms", "stripe_payment", "calendar"]
