@@ -25,6 +25,7 @@ from forge.runtime.primitives import (
 from forge.runtime.primitives.critics import CriticVerdict
 from forge.runtime.knowledge import DomainKnowledge
 from forge.runtime.structured_outputs import AgentResponse, TaskStatus, parse_agent_response
+from forge.runtime.confidence import ConfidenceScorer, ConfidenceScore
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ class TaskResult:
     output: str
     data: dict[str, Any] = field(default_factory=dict)
     sub_tasks: list[str] = field(default_factory=list)
+    confidence: float = 1.0
+    confidence_level: str = "high"
 
 
 class Agent:
@@ -125,6 +128,7 @@ class Agent:
         self._critic = critic
         self._escalation_policy = escalation_policy or EscalationPolicy()
         self.domain_knowledge = domain_knowledge
+        self._confidence_scorer = ConfidenceScorer()
 
         if tools:
             for tool in tools:
@@ -312,7 +316,17 @@ class Agent:
                     except Exception:
                         pass
 
-                return TaskResult(success=True, output=final_output)
+                # Score confidence on final output
+                output_confidence = self._confidence_scorer.score_output(
+                    final_output, task, quality_score=quality_score,
+                )
+
+                return TaskResult(
+                    success=True,
+                    output=final_output,
+                    confidence=output_confidence.score,
+                    confidence_level=output_confidence.level.value,
+                )
 
             # Max iterations reached
             self.status = AgentStatus.ERROR
@@ -438,6 +452,27 @@ class Agent:
         tool = self.tool_registry.get(fn_name)
         if not tool:
             return {"id": tc["id"], "output": f"Unknown tool: {fn_name}"}
+
+        # Confidence-gated autonomy check
+        confidence = self._confidence_scorer.score_tool_call(fn_name, args)
+        if confidence.level == "low":
+            logger.warning(
+                f"LOW confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
+            )
+            if self._approval_gate and not self.require_human_approval:
+                approval = await self._approval_gate.approve(ApprovalRequest(
+                    agent_name=self.name,
+                    action_description=f"Low-confidence tool call '{fn_name}': {confidence.reasoning}",
+                    action_type="tool_call",
+                    urgency=Urgency.HIGH,
+                    context={"tool": fn_name, "args": args, "confidence": confidence.score},
+                ))
+                if approval.decision == ApprovalDecision.REJECTED:
+                    return {"id": tc["id"], "output": f"Tool call rejected (low confidence): {approval.feedback}"}
+        elif confidence.level == "medium":
+            logger.info(
+                f"MEDIUM confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
+            )
 
         try:
             # Human approval gate

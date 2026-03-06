@@ -27,10 +27,11 @@ from typing import Any
 from forge.runtime.types import LLMClient
 
 from forge.runtime.guardrails import GuardrailsEngine
-from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS
+from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS, Event, EventType
 from forge.runtime.phase_gates import PhaseGateEnforcer
 from forge.runtime.structured_outputs import parse_completion_signal
 from forge.runtime.token_manager import TokenCounter
+from forge.runtime.confidence import ConfidenceScorer
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class OrchestratorAgent:
         self._trace_ctx: TraceContext | None = None
         self._guardrails: GuardrailsEngine | None = None
         self._token_counter = TokenCounter(model=self.model)
+        self._confidence_scorer = ConfidenceScorer()
 
     def set_llm_client(self, client: LLMClient | None) -> None:
         self._llm_client = client

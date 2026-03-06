@@ -31,6 +31,7 @@ from forge.runtime.inbound import InboundProcessor, InboundItem, FileDropChannel
 from forge.runtime.agent_spawner import AgentSpawner, SpawnedAgent
 from forge.runtime.stress_lab import StressLab, Scenario, CycleReport
 from forge.runtime.orchestrator import OrchestratorAgent, OrchestratorResult
+from forge.runtime.confidence import ConfidenceScorer, ConfidenceScore, ConfidenceLevel
 
 __all__ = [
     "Agent",
@@ -120,4 +121,7 @@ __all__ = [
     "CycleReport",
     "OrchestratorAgent",
     "OrchestratorResult",
+    "ConfidenceScorer",
+    "ConfidenceScore",
+    "ConfidenceLevel",
 ]
