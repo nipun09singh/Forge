@@ -27,6 +27,33 @@ demo_data/
 data/
 *.db
 
+# Generated test outputs
+demo/
+demo_fixed/
+depth_test/
+final_test/
+final_verify/
+founder_final/
+founder_test/
+god_test/
+gpt4o_test/
+l5_test/
+live_test/
+opus_test/
+orch_test/
+project_test/
+stress_test/
+unicorn_test/
+verify_final/
+
+# Generated agencies
+generated/
+ai_dev_agency/
+
+# Workspace outputs
+workspace/
+inbox/
+
 # OS
 .DS_Store
 Thumbs.db
