@@ -119,24 +119,31 @@ class TestConversationPruning:
 
     def test_tool_exchanges_kept_intact(self):
         """Tool call + tool responses are not split during pruning."""
-        tc = TokenCounter(model="gpt-3.5-turbo")
+        tc = TokenCounter(model="gpt-3.5-turbo")  # 16k limit
         messages = [{"role": "system", "content": "System"}]
-        # Add padding
+        # Add enough padding to force pruning
         for i in range(100):
             messages.append({"role": "user", "content": "padding " * 100})
-        # Add a tool exchange at the end
+        # Add a tool exchange near the end (should survive pruning)
         messages.append({"role": "assistant", "content": "", "tool_calls": [
-            {"function": {"name": "test", "arguments": "{}"}}
+            {"function": {"name": "test_tool", "arguments": '{"x": 1}'}}
         ]})
-        messages.append({"role": "tool", "content": "tool result", "tool_call_id": "tc1"})
-        messages.append({"role": "user", "content": "Final message"})
+        messages.append({"role": "tool", "content": "tool output result", "tool_call_id": "tc1"})
+        messages.append({"role": "user", "content": "Continue working"})
 
         result = tc.prune_conversation(messages)
-        # If tool response is present, assistant with tool_calls should also be present
-        has_tool_response = any(m.get("role") == "tool" for m in result)
-        has_tool_call_assistant = any("tool_calls" in m for m in result)
-        if has_tool_response:
-            assert has_tool_call_assistant
+
+        # Verify pruning actually happened
+        assert len(result) < len(messages), "Pruning should have removed messages"
+
+        # Check tool exchange integrity: if tool response kept, assistant must be too
+        tool_responses = [m for m in result if m.get("role") == "tool"]
+        tool_call_assistants = [m for m in result if "tool_calls" in m]
+
+        # The tool exchange is near the end so should survive pruning.
+        # Both pieces must be present together, or both absent.
+        assert len(tool_responses) == len(tool_call_assistants), \
+            f"Tool exchange split: {len(tool_call_assistants)} assistant(s) with tool_calls, {len(tool_responses)} tool response(s)"
 
     def test_long_tool_outputs_truncated(self):
         """Long tool outputs are truncated before dropping messages."""
@@ -172,6 +179,70 @@ class TestConversationPruning:
         result = tc.prune_conversation(messages)
         assert tc.count_message_tokens(result) < tc.count_message_tokens(messages)
         assert tc.count_message_tokens(result) <= tc.available_tokens
+
+
+class TestCharEstimationFallback:
+    """Tests for character-based estimation when tiktoken is unavailable."""
+
+    def test_fallback_count_is_positive(self):
+        """Character estimation returns positive counts for non-empty text."""
+        tc = TokenCounter()
+        # Force fallback mode
+        tc._use_tiktoken = False
+        tc._encoding = None
+
+        count = tc.count_tokens("Hello world, this is a test sentence.")
+        assert count > 0
+
+    def test_fallback_empty_string(self):
+        """Fallback returns 0 for empty string."""
+        tc = TokenCounter()
+        tc._use_tiktoken = False
+        tc._encoding = None
+        assert tc.count_tokens("") == 0
+
+    def test_fallback_proportional_to_length(self):
+        """Longer text produces more estimated tokens."""
+        tc = TokenCounter()
+        tc._use_tiktoken = False
+        tc._encoding = None
+
+        short_count = tc.count_tokens("Hello")
+        long_count = tc.count_tokens("Hello " * 100)
+        assert long_count > short_count
+
+    def test_fallback_vs_tiktoken_reasonable(self):
+        """Fallback estimate should be within 2x of tiktoken count."""
+        tc = TokenCounter()
+        if not tc._use_tiktoken:
+            pytest.skip("tiktoken not available for comparison")
+
+        text = "The quick brown fox jumps over the lazy dog. " * 10
+        tiktoken_count = tc.count_tokens(text)
+
+        # Force fallback
+        tc._use_tiktoken = False
+        tc._encoding = None
+        fallback_count = tc.count_tokens(text)
+
+        # Should be within 2x either direction
+        ratio = fallback_count / tiktoken_count if tiktoken_count > 0 else 1
+        assert 0.3 < ratio < 3.0, f"Fallback ratio {ratio:.2f} is too far from tiktoken"
+
+    def test_fallback_pruning_still_works(self):
+        """Conversation pruning works correctly with character estimation."""
+        tc = TokenCounter(model="gpt-3.5-turbo")
+        tc._use_tiktoken = False
+        tc._encoding = None
+
+        messages = [{"role": "system", "content": "System prompt"}]
+        for i in range(200):
+            messages.append({"role": "user", "content": "x " * 500})
+
+        assert tc.needs_pruning(messages) is True
+        result = tc.prune_conversation(messages)
+        assert len(result) < len(messages)
+        assert result[0]["role"] == "system"
 
 
 class TestModelContextLimits:

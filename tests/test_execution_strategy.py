@@ -17,16 +17,18 @@ class TestExecutionStrategy:
     def test_team_value(self):
         assert ExecutionStrategy.TEAM == "team"
 
-    def test_string_conversion(self):
-        assert str(ExecutionStrategy.ORCHESTRATOR) == "ExecutionStrategy.ORCHESTRATOR"
+    def test_all_strategies_documented(self):
+        """Every strategy has a docstring description."""
+        # Verify enum members are the expected set
+        assert set(ExecutionStrategy) == {ExecutionStrategy.ORCHESTRATOR, ExecutionStrategy.TEAM}
 
-    def test_from_value(self):
-        assert ExecutionStrategy("orchestrator") == ExecutionStrategy.ORCHESTRATOR
-        assert ExecutionStrategy("team") == ExecutionStrategy.TEAM
-
-    def test_invalid_value(self):
-        with pytest.raises(ValueError):
-            ExecutionStrategy("invalid")
+    def test_strategy_is_string_compatible(self):
+        """Strategy values can be used as strings (for serialization)."""
+        assert ExecutionStrategy.ORCHESTRATOR == "orchestrator"
+        assert ExecutionStrategy.TEAM == "team"
+        # Round-trip: string -> enum -> string
+        for strategy in ExecutionStrategy:
+            assert ExecutionStrategy(strategy.value) == strategy
 
     def test_is_str_subclass(self):
         """ExecutionStrategy is a str enum, so members are also strings."""

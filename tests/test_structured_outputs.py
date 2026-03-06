@@ -116,10 +116,12 @@ class TestParseCompletionSignal:
 
     # ── Structured JSON detection ──
     def test_json_done(self):
-        text = '{"status": "DONE", "summary": "Built it"}'
+        text = '{"status": "DONE", "summary": "Built it", "files_created": 5}'
         c = parse_completion_signal(text)
         assert c is not None
+        assert c.status == "DONE"
         assert c.summary == "Built it"
+        assert c.files_created == 5
 
     def test_json_completed(self):
         text = '{"status": "completed", "summary": "All good"}'
@@ -133,26 +135,43 @@ class TestParseCompletionSignal:
 
     # ── String fallback detection ──
     def test_bare_done(self):
-        assert parse_completion_signal("DONE") is not None
+        c = parse_completion_signal("DONE")
+        assert c is not None
+        assert c.status == "DONE"
+        assert isinstance(c.summary, str)
 
     def test_done_period(self):
-        assert parse_completion_signal("DONE.") is not None
+        c = parse_completion_signal("DONE.")
+        assert c is not None
+        assert c.status == "DONE"
 
     def test_done_with_newline(self):
-        assert parse_completion_signal("DONE\nSome extra text") is not None
+        c = parse_completion_signal("DONE\nSome extra text")
+        assert c is not None
+        assert c.status == "DONE"
+        assert "DONE" in c.summary
 
     def test_trailing_done(self):
-        assert parse_completion_signal("All work complete\nDONE") is not None
+        c = parse_completion_signal("All work complete\nDONE")
+        assert c is not None
+        assert c.status == "DONE"
 
     def test_project_is_complete(self):
-        assert parse_completion_signal("The PROJECT IS COMPLETE and ready.") is not None
+        c = parse_completion_signal("The PROJECT IS COMPLETE and ready.")
+        assert c is not None
+        assert c.status == "DONE"
+        assert len(c.summary) > 0
 
     def test_done_in_middle(self):
-        assert parse_completion_signal("First line\nDONE\nLast line") is not None
+        c = parse_completion_signal("First line\nDONE\nLast line")
+        assert c is not None
+        assert c.status == "DONE"
 
     def test_case_insensitive(self):
-        assert parse_completion_signal("done") is not None
-        assert parse_completion_signal("Done") is not None
+        for variant in ["done", "Done", "DONE", "dOnE"]:
+            c = parse_completion_signal(variant)
+            assert c is not None, f"Failed for variant: {variant}"
+            assert c.status == "DONE"
 
     # ── Negative cases ──
     def test_empty(self):

@@ -74,7 +74,7 @@ class OrchestratorAgent:
         max_iterations: int = 200,
         quality_bar: str = "production-ready",
         max_duration_seconds: float = 3600.0,
-        max_cost_usd: float = 10.0,
+        max_cost_usd: float = 5.0,
     ):
         self._llm_client: LLMClient | None = llm_client
         self.model = model
@@ -242,6 +242,7 @@ class OrchestratorAgent:
 
         for iteration in range(self.max_iterations):
             iterations = iteration + 1
+            _iter_span = self._trace_ctx.new_span() if self._trace_ctx else None
             logger.info(f"\n--- Iteration {iterations}/{self.max_iterations} ---")
 
             elapsed = time.time() - start_time
@@ -345,13 +346,23 @@ class OrchestratorAgent:
                                     if "path" in args and not os.path.isabs(args["path"]):
                                         args["path"] = str(project_dir / args["path"])
 
+                                if self._event_log:
+                                    self._event_log.emit_tool_use(
+                                        agent_name="orchestrator",
+                                        tool_name=fn_name,
+                                        args=args,
+                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                                    )
+
+                                _tool_start = time.time()
                                 output = await tool.run(**args)
+                                _tool_duration = (time.time() - _tool_start) * 1000
                                 logger.info(f"  🔧 {fn_name}: {str(output)[:80]}")
 
                                 if self._event_log:
                                     self._event_log.emit_tool_result(
                                         agent_name="orchestrator", tool_name=fn_name, success=True,
-                                        output_preview=str(output)[:200], duration_ms=0.0,
+                                        output_preview=str(output)[:200], duration_ms=_tool_duration,
                                         trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
                                     )
 
@@ -371,7 +382,7 @@ class OrchestratorAgent:
                                 if self._event_log:
                                     self._event_log.emit_tool_result(
                                         agent_name="orchestrator", tool_name=fn_name, success=False,
-                                        output_preview=str(e)[:200], duration_ms=0.0,
+                                        output_preview=str(e)[:200], duration_ms=(time.time() - _tool_start) * 1000,
                                         trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
                                     )
                                 conversation.append({
@@ -424,12 +435,24 @@ class OrchestratorAgent:
                     "content": f"An error occurred: {e}. Please continue building the project.",
                 })
 
+            if _iter_span and self._trace_ctx:
+                self._trace_ctx.end_span()
+
             # Smart context management — token-aware pruning
             if self._token_counter.needs_pruning(conversation):
                 # Generate state summary every 20 iterations
                 pinned = None
                 if iterations % 20 == 0 and iterations > 0:
                     try:
+                        if self._event_log:
+                            self._event_log.emit_llm_call(
+                                agent_name="orchestrator",
+                                model=self.model,
+                                messages_count=2,
+                                tools_count=0,
+                                trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                            )
+                        _summary_start = time.time()
                         summary_resp = await self._llm_client.chat.completions.create(
                             model=self.model,
                             messages=[
@@ -438,8 +461,19 @@ class OrchestratorAgent:
                             ],
                             temperature=0.2,
                         )
+                        _summary_duration = (time.time() - _summary_start) * 1000
                         state_summary = summary_resp.choices[0].message.content or ""
                         if hasattr(summary_resp, 'usage') and summary_resp.usage:
+                            if self._event_log:
+                                self._event_log.emit_llm_response(
+                                    agent_name="orchestrator",
+                                    model=self.model,
+                                    prompt_tokens=getattr(summary_resp.usage, 'prompt_tokens', 0) or 0,
+                                    completion_tokens=getattr(summary_resp.usage, 'completion_tokens', 0) or 0,
+                                    has_tool_calls=False,
+                                    duration_ms=_summary_duration,
+                                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                                )
                             s_prompt = getattr(summary_resp.usage, 'prompt_tokens', 0) or 0
                             s_completion = getattr(summary_resp.usage, 'completion_tokens', 0) or 0
                             total_tokens += s_prompt + s_completion
