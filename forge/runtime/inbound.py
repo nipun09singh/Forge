@@ -77,11 +77,31 @@ class FileDropChannel(InboundChannel):
 class APIQueueChannel(InboundChannel):
     """In-memory queue for tasks submitted via API."""
 
-    def __init__(self):
+    def __init__(self, api_key: str = "", auth_disabled: bool = False):
         self._queue: asyncio.Queue[InboundItem] = asyncio.Queue()
+        self._api_key = api_key
+        self._auth_disabled = auth_disabled
 
-    async def submit(self, task: str, priority: str = "medium", metadata: dict | None = None) -> str:
-        """Submit a task to the queue. Returns item ID."""
+    def _verify_key(self, api_key: str | None) -> None:
+        """Verify the API key for task submission.
+
+        Raises PermissionError if auth is configured and the key is missing/invalid.
+        """
+        import hmac
+        if self._auth_disabled or not self._api_key:
+            return
+        if not api_key:
+            raise PermissionError("API key required for task submission")
+        if not hmac.compare_digest(api_key, self._api_key):
+            raise PermissionError("Invalid API key for task submission")
+
+    async def submit(self, task: str, priority: str = "medium", metadata: dict | None = None, *, api_key: str | None = None) -> str:
+        """Submit a task to the queue. Returns item ID.
+
+        If the channel has an api_key configured, callers must supply a
+        matching ``api_key`` or a ``PermissionError`` is raised.
+        """
+        self._verify_key(api_key)
         import uuid
         item = InboundItem(
             id=f"api-{uuid.uuid4().hex[:8]}",
@@ -127,6 +147,8 @@ class InboundProcessor:
         execute_fn: Callable[..., Awaitable[Any]] | None = None,
         poll_interval: float = 10.0,
         max_concurrent: int = 5,
+        api_key: str = "",
+        auth_disabled: bool = False,
     ):
         self._execute_fn = execute_fn
         self.poll_interval = poll_interval
@@ -140,17 +162,30 @@ class InboundProcessor:
         self._history: list[dict[str, Any]] = []
 
         # Default channels
-        self._api_queue = APIQueueChannel()
+        self._api_queue = APIQueueChannel(api_key=api_key, auth_disabled=auth_disabled)
         self._channels["api"] = self._api_queue
         self._channels["file_drop"] = FileDropChannel()
+
+    def configure_api_auth(self, api_key: str = "", auth_disabled: bool = False) -> None:
+        """Configure auth on the built-in API queue channel.
+
+        Useful for post-construction wiring (e.g. from an API server that
+        discovers its API key at startup).
+        """
+        self._api_queue._api_key = api_key
+        self._api_queue._auth_disabled = auth_disabled
 
     def add_channel(self, name: str, channel: InboundChannel) -> None:
         """Add a custom inbound channel."""
         self._channels[name] = channel
 
-    async def submit_task(self, task: str, priority: str = "medium", metadata: dict | None = None) -> str:
-        """Submit a task to the API queue."""
-        return await self._api_queue.submit(task, priority, metadata)
+    async def submit_task(self, task: str, priority: str = "medium", metadata: dict | None = None, *, api_key: str | None = None) -> str:
+        """Submit a task to the API queue.
+
+        If the underlying APIQueueChannel has auth configured, the caller
+        must supply a valid ``api_key``.
+        """
+        return await self._api_queue.submit(task, priority, metadata, api_key=api_key)
 
     async def start(self) -> None:
         """Start the inbound processing loop."""

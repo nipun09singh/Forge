@@ -1,12 +1,15 @@
 """{{ agency_name }} — API Server"""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from main import build_agency
@@ -55,17 +58,47 @@ _agency = None
 _event_log = None
 
 
-def _get_api_key():
-    """Get the configured API key (None = auth disabled)."""
-    return os.getenv("AGENCY_API_KEY", "")
+def _init_auth() -> tuple[str, bool]:
+    """Initialize authentication — fail-closed by default.
+
+    Returns (api_key, auth_disabled) tuple.
+    - If AGENCY_AUTH_DISABLED=true: auth is off (with loud warning).
+    - If AGENCY_API_KEY is set: uses that key.
+    - Otherwise: generates a random key so endpoints are never silently open.
+    """
+    auth_disabled = os.getenv("AGENCY_AUTH_DISABLED", "").lower() == "true"
+    api_key = os.getenv("AGENCY_API_KEY", "")
+
+    if auth_disabled:
+        logger.warning("=" * 60)
+        logger.warning("WARNING: AGENCY_AUTH_DISABLED=true")
+        logger.warning("ALL API endpoints are UNAUTHENTICATED.")
+        logger.warning("Do NOT use this setting in production.")
+        logger.warning("=" * 60)
+        return "", True
+
+    if not api_key:
+        api_key = secrets.token_urlsafe(32)
+        logger.warning("=" * 60)
+        logger.warning("WARNING: AGENCY_API_KEY not set.")
+        logger.warning("Generated a random API key for this session:")
+        logger.warning(f"  AGENCY_API_KEY={api_key}")
+        logger.warning("Set the AGENCY_API_KEY env var for a persistent key.")
+        logger.warning("=" * 60)
+
+    return api_key, False
+
+
+_API_KEY, _AUTH_DISABLED = _init_auth()
 
 
 async def verify_api_key(authorization: str = Header(default="", alias="Authorization")):
-    """Verify API key from Authorization: Bearer <key> header."""
-    import hmac
-    expected = _get_api_key()
-    if not expected:
-        return  # Auth disabled if no key configured
+    """Verify API key from Authorization: Bearer <key> header.
+
+    Fail-closed: unless AGENCY_AUTH_DISABLED=true, a valid key is always required.
+    """
+    if _AUTH_DISABLED:
+        return
 
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header. Use: Authorization: Bearer <your-api-key>")
@@ -74,7 +107,7 @@ async def verify_api_key(authorization: str = Header(default="", alias="Authoriz
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid Authorization format. Use: Authorization: Bearer <your-api-key>")
 
-    if not hmac.compare_digest(parts[1], expected):
+    if not hmac.compare_digest(parts[1], _API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
@@ -82,6 +115,8 @@ async def verify_api_key(authorization: str = Header(default="", alias="Authoriz
 async def lifespan(app: FastAPI):
     global _agency, _event_log
     _agency, _event_log = build_agency()
+    # Wire API auth into the inbound processor's queue channel
+    _agency.inbound.configure_api_auth(api_key=_API_KEY, auth_disabled=_AUTH_DISABLED)
     logger.info(f"Agency '{_agency.name}' started")
     await _agency.scheduler.start()
     yield
@@ -94,6 +129,16 @@ app = FastAPI(
     description="{{ description }}",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# CORS: Allow dashboard and common development origins
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8080,http://localhost:8000").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -385,6 +430,34 @@ async def autonomous_status():
     if not _agency:
         raise HTTPException(status_code=503, detail="Agency not initialized")
     return _agency.inbound.get_stats()
+
+
+class InboundSubmitRequest(BaseModel):
+    """Request to submit a task to the inbound queue for async processing."""
+    task: str
+    priority: str = "medium"
+    metadata: dict = {}
+
+
+@app.post("/api/inbound/submit", dependencies=[Depends(verify_api_key)])
+async def submit_inbound_task(request: InboundSubmitRequest):
+    """Submit a task to the inbound queue for asynchronous processing.
+
+    Unlike /api/task (synchronous), this enqueues the task for background
+    processing by the autonomous inbound loop.
+    """
+    if not _agency:
+        raise HTTPException(status_code=503, detail="Agency not initialized")
+    try:
+        item_id = await _agency.inbound.submit_task(
+            task=request.task,
+            priority=request.priority,
+            metadata=request.metadata,
+            api_key=_API_KEY,
+        )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    return {"submitted": True, "item_id": item_id}
 
 
 @app.post("/api/evolve", dependencies=[Depends(verify_api_key)])
