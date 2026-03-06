@@ -24,8 +24,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from forge.runtime.types import LLMClient
+
 from forge.runtime.guardrails import GuardrailsEngine
 from forge.runtime.observability import EventLog, TraceContext
+from forge.runtime.structured_outputs import parse_completion_signal
+from forge.runtime.token_manager import TokenCounter
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +69,14 @@ class OrchestratorAgent:
 
     def __init__(
         self,
-        llm_client: Any = None,
+        llm_client: LLMClient | None = None,
         model: str = "gpt-4o",
         max_iterations: int = 200,
         quality_bar: str = "production-ready",
         max_duration_seconds: float = 3600.0,
         max_cost_usd: float = 10.0,
     ):
-        self._llm_client = llm_client
+        self._llm_client: LLMClient | None = llm_client
         self.model = model
         self.max_iterations = max_iterations
         self.quality_bar = quality_bar
@@ -83,8 +87,9 @@ class OrchestratorAgent:
         self._event_log: EventLog | None = None
         self._trace_ctx: TraceContext | None = None
         self._guardrails: GuardrailsEngine | None = None
+        self._token_counter = TokenCounter(model=self.model)
 
-    def set_llm_client(self, client: Any) -> None:
+    def set_llm_client(self, client: LLMClient | None) -> None:
         self._llm_client = client
 
     def set_event_log(self, log: EventLog) -> None:
@@ -361,29 +366,11 @@ class OrchestratorAgent:
                 text_output = choice.message.content or ""
                 conversation.append({"role": "assistant", "content": text_output})
 
-                # Check for structured completion signal first (preferred)
-                try:
-                    completion = json.loads(text_output.strip())
-                    if isinstance(completion, dict) and completion.get("status", "").upper() == "DONE":
-                        project_complete = True
-                        logger.info(f"  ✅ Agent declares project complete (structured)")
-                        break
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-
-                # Fall back to string-based DONE detection
-                text_upper = text_output.strip().upper()
-                done_signals = [
-                    text_upper == "DONE",
-                    text_upper == "DONE.",
-                    text_upper.startswith("DONE\n") or text_upper.startswith("DONE."),
-                    text_upper.endswith("\nDONE") or text_upper.endswith("\nDONE."),
-                    "PROJECT IS COMPLETE" in text_upper,
-                    "\nDONE\n" in f"\n{text_output.strip()}\n",
-                ]
-                if any(done_signals) and len(files_created) >= 1:
+                # Check for completion signal (structured JSON or string patterns)
+                completion = parse_completion_signal(text_output)
+                if completion and len(files_created) >= 1:
                     project_complete = True
-                    logger.info(f"  ✅ Agent declares project complete")
+                    logger.info(f"  ✅ Agent declares project complete: {completion.summary[:80]}")
                     break
 
                 # If agent just talks without acting, nudge it
@@ -403,11 +390,10 @@ class OrchestratorAgent:
                     "content": f"An error occurred: {e}. Please continue building the project.",
                 })
 
-            # Smart context management — preserve architecture, prune verbose output
-            if len(conversation) > 60:
-                system = conversation[:1]
-                
-                # Every 20 iterations, ask the LLM to summarize project state
+            # Smart context management — token-aware pruning
+            if self._token_counter.needs_pruning(conversation):
+                # Generate state summary every 20 iterations
+                pinned = None
                 if iterations % 20 == 0 and iterations > 0:
                     try:
                         summary_resp = await self._llm_client.chat.completions.create(
@@ -421,42 +407,12 @@ class OrchestratorAgent:
                         state_summary = summary_resp.choices[0].message.content or ""
                         if hasattr(summary_resp, 'usage') and summary_resp.usage:
                             total_tokens += getattr(summary_resp.usage, 'total_tokens', 0)
-                        # Pin as a persistent context message right after system
                         pinned = {"role": "user", "content": f"[PROJECT STATE - iteration {iterations}]: {state_summary}"}
                     except Exception as e:
                         logger.debug(f"State summary generation failed: {e}")
                         pinned = {"role": "user", "content": f"[PROJECT STATE]: Files created: {', '.join(files_created[-20:])}"}
-                else:
-                    pinned = None
                 
-                # Truncate tool results but keep assistant reasoning intact
-                pruned = []
-                for msg in conversation[1:]:
-                    if msg.get("role") == "tool":
-                        content = msg.get("content", "")
-                        if len(content) > 800:
-                            pruned.append({**msg, "content": content[:800] + "...(truncated)"})
-                        else:
-                            pruned.append(msg)
-                    else:
-                        pruned.append(msg)
-                
-                # Keep last 50 messages, but ensure we don't orphan tool messages
-                # Find a safe cut point where we don't split assistant+tool_calls pairs
-                keep_count = 50
-                if len(pruned) > keep_count:
-                    cut_idx = len(pruned) - keep_count
-                    # Walk forward to find a safe cut point (not in the middle of a tool exchange)
-                    while cut_idx < len(pruned) and pruned[cut_idx].get("role") == "tool":
-                        cut_idx += 1
-                    recent = pruned[cut_idx:]
-                else:
-                    recent = pruned
-                
-                if pinned:
-                    conversation = system + [pinned] + recent
-                else:
-                    conversation = system + recent
+                conversation = self._token_counter.prune_conversation(conversation, pinned_message=pinned)
 
         # OBSERVE: Scan for created files
         for f in project_dir.rglob("*"):

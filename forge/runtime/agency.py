@@ -24,6 +24,7 @@ from forge.runtime.self_evolution import SelfEvolution
 from forge.runtime.agent_spawner import AgentSpawner
 from forge.runtime.stress_lab import StressLab
 from forge.runtime.orchestrator import OrchestratorAgent
+from forge.runtime.execution_strategy import ExecutionStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +47,12 @@ class Agency:
         model: str = "gpt-4",
         api_key: str | None = None,
         base_url: str | None = None,
+        execution_strategy: ExecutionStrategy = ExecutionStrategy.ORCHESTRATOR,
     ):
         self.name = name
         self.description = description
         self.model = model
+        self.strategy = execution_strategy
         self.memory = SharedMemory()
         self.router = Router()
         self.teams: dict[str, Team] = {}
@@ -62,8 +65,12 @@ class Agency:
         self.self_evolution = SelfEvolution()
         self.agent_spawner = AgentSpawner()
         self.project_executor = ProjectExecutor()
+        # Note: These are kept for backward compatibility.
+        # Prefer agency.execute_project() for new code.
         self.stress_lab = StressLab(agency=self)
         self.orchestrator = OrchestratorAgent(model=model)
+        # Note: These are kept for backward compatibility.
+        # Prefer agency.execute_project() for new code.
 
         # Strategic planner for complex task decomposition
         self.planner = Planner(model=model)
@@ -231,28 +238,41 @@ class Agency:
             ))
         return await asyncio.gather(*coros, return_exceptions=True)
 
-    async def execute_project(self, task: str, workdir: str = "./workspace/project") -> dict[str, Any]:
+    async def execute_project(
+        self,
+        task: str,
+        workdir: str = "./workspace",
+        strategy: ExecutionStrategy | None = None,
+    ) -> "TaskResult":
         """
-        Execute a complex project — plans, builds multi-file output, tests, commits.
-        
-        This is "project mode" — for tasks that require multiple files,
-        builds, tests, and iterative debugging. Uses the full agent team.
+        Unified entry point for project execution.
+
+        Uses the configured execution strategy (default: orchestrator).
+        Override with the strategy parameter for one-off changes.
         """
-        result = await self.project_executor.execute_project(
-            task=task,
-            agency=self,
-            workdir=workdir,
-        )
-        return {
-            "success": result.success,
-            "project_dir": result.project_dir,
-            "files_created": result.files_created,
-            "steps_completed": result.steps_completed,
-            "steps_total": result.steps_total,
-            "duration_seconds": result.total_duration_seconds,
-            "cost_usd": result.total_cost_usd,
-            "summary": result.summary,
-        }
+        effective_strategy = strategy or self.strategy
+
+        if effective_strategy == ExecutionStrategy.ORCHESTRATOR:
+            if not self.orchestrator._llm_client:
+                self.orchestrator.set_llm_client(self._llm_client)
+            result = await self.orchestrator.build(task, workdir=workdir)
+            return TaskResult(
+                success=result.success,
+                output=result.summary,
+                data={
+                    "files_created": result.files_created,
+                    "iterations": result.iterations,
+                    "duration_seconds": result.duration_seconds,
+                    "total_tokens": result.total_tokens,
+                },
+            )
+        elif effective_strategy == ExecutionStrategy.TEAM:
+            if self.teams:
+                first_team = next(iter(self.teams.values()))
+                return await first_team.execute(task)
+            return TaskResult(success=False, output="No teams configured for team strategy.")
+        else:
+            return TaskResult(success=False, output=f"Unknown strategy: {effective_strategy}")
 
     async def orchestrate(self, task: str, workdir: str = "./workspace/project") -> dict[str, Any]:
         """

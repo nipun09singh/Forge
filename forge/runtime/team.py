@@ -10,6 +10,7 @@ from typing import Any
 
 from forge.runtime.agent import Agent, AgentStatus, TaskResult
 from forge.runtime.memory import SharedMemory
+from forge.runtime.types import TaskContext
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class Team:
         """Remove an agent from the team."""
         self.agents = [a for a in self.agents if a.id != agent_id]
 
-    async def execute(self, task: str, context: dict[str, Any] | None = None) -> TaskResult:
+    async def execute(self, task: str, context: TaskContext | dict[str, Any] | None = None) -> TaskResult:
         """
         Execute a task as a team.
         
@@ -76,7 +77,7 @@ class Team:
             return await self._led_execution(task, context)
         return await self._parallel_execution(task, context)
 
-    async def _led_execution(self, task: str, context: dict[str, Any] | None) -> TaskResult:
+    async def _led_execution(self, task: str, context: TaskContext | dict[str, Any] | None) -> TaskResult:
         """Lead agent coordinates the team."""
         assert self.lead is not None
 
@@ -150,7 +151,7 @@ class Team:
 
         return await self.lead.execute(delegation_prompt, context)
 
-    async def _parallel_execution(self, task: str, context: dict[str, Any] | None) -> TaskResult:
+    async def _parallel_execution(self, task: str, context: TaskContext | dict[str, Any] | None) -> TaskResult:
         """All agents work on the task independently in parallel."""
         # Ensure all agents have tools
         try:

@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from forge.runtime.tools import Tool, ToolRegistry
 from forge.runtime.memory import SharedMemory
+from forge.runtime.types import LLMClient, ChatMessage, LLMResponse, ToolResult as ToolResultDict, TaskContext
 from forge.runtime.improvement import QualityGate, QualityVerdict, ReflectionEngine, PerformanceTracker, TaskMetric
 from forge.runtime.observability import EventLog, TraceContext, EventType, Event
 from forge.runtime.human import HumanApprovalGate, ApprovalRequest, ApprovalResult, ApprovalDecision, Urgency
@@ -23,6 +24,7 @@ from forge.runtime.primitives import (
 )
 from forge.runtime.primitives.critics import CriticVerdict
 from forge.runtime.knowledge import DomainKnowledge
+from forge.runtime.structured_outputs import AgentResponse, TaskStatus, parse_agent_response
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,7 @@ class Agent:
         self.memory = SharedMemory()
         self.conversation: list[dict[str, Any]] = []
         self._sub_agents: list[Agent] = []
-        self._llm_client: Any = None  # Set by Agency at runtime
+        self._llm_client: LLMClient | None = None  # Set by Agency at runtime
         self.enable_reflection = enable_reflection
         self.quality_threshold = quality_threshold
         self.max_reflections = max_reflections
@@ -128,7 +130,7 @@ class Agent:
             for tool in tools:
                 self.tool_registry.register(tool)
 
-    def set_llm_client(self, client: Any) -> None:
+    def set_llm_client(self, client: LLMClient) -> None:
         """Inject the LLM client (called by Agency during setup)."""
         self._llm_client = client
 
@@ -166,7 +168,7 @@ class Agent:
         """Set smart model router for cost-optimized LLM selection."""
         self._model_router = router
 
-    async def execute(self, task: str, context: dict[str, Any] | None = None) -> TaskResult:
+    async def execute(self, task: str, context: TaskContext | dict[str, Any] | None = None) -> TaskResult:
         """
         Execute a task using the agent's reasoning loop.
         
@@ -239,6 +241,21 @@ class Agent:
 
                 # No tool calls — agent is done
                 final_output = response.get("content", "")
+                
+                # Try to parse as structured response for richer metadata
+                structured = parse_agent_response(final_output)
+                if structured and structured.status == TaskStatus.FAILED:
+                    self.status = AgentStatus.ERROR
+                    if self._performance_tracker:
+                        self._performance_tracker.record(TaskMetric(
+                            agent_name=self.name,
+                            task_preview=task[:100],
+                            success=False,
+                            quality_score=0.0,
+                            duration_seconds=time.time() - _start_time,
+                            iterations_used=iteration + 1,
+                        ))
+                    return TaskResult(success=False, output=structured.content or final_output)
                 self.conversation.append({"role": "assistant", "content": final_output})
                 self.memory.store(f"{self.name}:last_result", final_output)
 
@@ -326,7 +343,7 @@ class Agent:
                 ))
             return TaskResult(success=False, output=f"Agent error: {e}")
 
-    async def _call_llm(self) -> dict[str, Any]:
+    async def _call_llm(self) -> LLMResponse:
         """Call the LLM with current conversation and available tools."""
         if not self._llm_client:
             raise RuntimeError(f"Agent '{self.name}' has no LLM client. Attach via Agency.")
@@ -390,7 +407,7 @@ class Agent:
             ]
         return result
 
-    async def _execute_tools(self, tool_calls: list[dict]) -> list[dict]:
+    async def _execute_tools(self, tool_calls: list[dict]) -> list[ToolResultDict]:
         """Execute tool calls concurrently and return results."""
         import json
         semaphore = asyncio.Semaphore(self._max_concurrent_tools)
@@ -402,7 +419,7 @@ class Agent:
         results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
         return list(results)
 
-    async def _execute_single_tool(self, tc: dict) -> dict:
+    async def _execute_single_tool(self, tc: dict) -> ToolResultDict:
         """Execute a single tool call with guardrails, approval, and observability."""
         import json
         fn_name = tc["function"]["name"]
