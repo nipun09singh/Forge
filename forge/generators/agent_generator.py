@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -14,6 +15,14 @@ logger = logging.getLogger(__name__)
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 
 
+def _sanitize_python_name(name: str) -> str:
+    """Convert a display name to a valid Python identifier."""
+    name = name.lower()
+    name = re.sub(r'[^a-z0-9_]', '_', name)
+    name = re.sub(r'_+', '_', name)
+    return name.strip('_')
+
+
 class AgentGenerator:
     """Generates Python agent modules from AgentBlueprint."""
 
@@ -23,6 +32,7 @@ class AgentGenerator:
             trim_blocks=True,
             lstrip_blocks=True,
         )
+        self.env.filters["pyname"] = _sanitize_python_name
 
     def generate(self, blueprint: AgentBlueprint, output_dir: Path) -> Path:
         """Generate an agent module file."""
@@ -49,7 +59,7 @@ class AgentGenerator:
             max_iterations=blueprint.max_iterations,
         )
 
-        safe_name = blueprint.name.lower().replace(" ", "_")
+        safe_name = _sanitize_python_name(blueprint.name)
         output_path = output_dir / f"agent_{safe_name}.py"
         output_path.write_text(content, encoding="utf-8")
         logger.info(f"Generated agent module: {output_path}")
