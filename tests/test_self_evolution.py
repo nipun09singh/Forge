@@ -747,3 +747,99 @@ class TestDeferredRollback:
         rollback_records = [r for r in records2 if r.change_type.startswith("rollback_")]
         assert len(rollback_records) == 0
         assert agent.model != "gpt-4"  # NOT restored
+
+
+# ---------------------------------------------------------------------------
+# Edge-case tests — empty agents, no metrics, no previous baseline
+# ---------------------------------------------------------------------------
+
+class TestEvolutionEmptyAgentList:
+    """Evolution with empty or None agent list."""
+
+    @pytest.mark.asyncio
+    async def test_empty_agent_dict(self):
+        """run_evolution_cycle with an empty agent dict returns gracefully."""
+        tracker = _make_tracker_with_data(successes=8, failures=2)
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        records = await evo.run_evolution_cycle(agents={})
+        assert isinstance(records, list)
+        # No deep mutations possible with no agents
+        deep_types = {"model_downgrade", "temperature_decrease", "temperature_increase",
+                      "enable_reflection", "increase_iterations"}
+        deep = [r for r in records if r.change_type in deep_types]
+        assert len(deep) == 0
+
+    @pytest.mark.asyncio
+    async def test_none_agents(self):
+        """run_evolution_cycle with agents=None is a graceful no-op."""
+        tracker = _make_tracker_with_data(successes=8, failures=2)
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        records = await evo.run_evolution_cycle(agents=None)
+        assert isinstance(records, list)
+
+
+class TestEvolutionAgentNoMetrics:
+    """Evolution with an agent that has no performance tracker."""
+
+    @pytest.mark.asyncio
+    async def test_agent_without_performance_tracker_is_skipped(self):
+        """Agents without _performance_tracker are skipped for deep mutations."""
+        tracker = _make_tracker_with_data(successes=8, failures=2)
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        agent = Agent(name="NoMetrics", role="test", system_prompt="test")
+        agent.set_llm_client(client)
+        # Explicitly ensure no _performance_tracker
+        if hasattr(agent, '_performance_tracker'):
+            agent._performance_tracker = None
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        records = await evo.run_evolution_cycle(agents={"NoMetrics": agent})
+
+        deep_types = {"model_downgrade", "temperature_decrease", "temperature_increase",
+                      "enable_reflection", "increase_iterations"}
+        deep = [r for r in records if r.change_type in deep_types]
+        assert len(deep) == 0
+
+
+class TestDeferredRollbackNoPreviousBaseline:
+    """Deferred rollback with no previous pending rollbacks."""
+
+    @pytest.mark.asyncio
+    async def test_no_pending_rollbacks_returns_empty(self):
+        """_process_pending_rollbacks with empty list returns []."""
+        evo = SelfEvolution(None, None, llm_client=None)
+        assert evo._pending_rollbacks == []
+        result = await evo._process_pending_rollbacks({"A": MagicMock()})
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_pending_rollback_agent_not_in_dict(self):
+        """Pending rollback for an agent not in the agents dict is skipped."""
+        tracker = _make_tracker_with_data(successes=8, failures=2)
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=AsyncMock())
+        record = EvolutionRecord(
+            target_agent="Ghost", change_type="model_downgrade",
+            before_score=0.9, after_score=0.9, applied=True,
+        )
+        evo._pending_rollbacks.append(("Ghost", record, {"model": "gpt-4"}))
+
+        # Process with a dict that doesn't include "Ghost"
+        result = await evo._process_pending_rollbacks({"Other": MagicMock()})
+        assert result == []
