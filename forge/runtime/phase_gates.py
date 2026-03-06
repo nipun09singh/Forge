@@ -144,7 +144,7 @@ class PhaseGateEnforcer:
         if self._current_phase == Phase.RESEARCH:
             research_tools = reqs["required_tools"]
             used_research = any(t in status.tools_used for t in research_tools)
-            if status.iterations_in_phase >= reqs["min_iterations"] and (used_research or self._total_iterations > 5):
+            if status.iterations_in_phase >= reqs["min_iterations"] and used_research:
                 self._advance_to(Phase.BUILD)
 
         elif self._current_phase == Phase.BUILD:
@@ -154,7 +154,7 @@ class PhaseGateEnforcer:
                 self._advance_to(Phase.TEST)
 
         elif self._current_phase == Phase.TEST:
-            if status.tests_run:
+            if status.tests_run and status.test_passed:
                 self._advance_to(Phase.VERIFY)
 
         elif self._current_phase == Phase.VERIFY:
@@ -242,6 +242,8 @@ class PhaseGateEnforcer:
 
         if not self._phases[Phase.TEST].tests_run:
             blockers.append("TEST phase not completed — must run tests before completing")
+        elif not self._phases[Phase.TEST].test_passed:
+            blockers.append("TEST phase not passed — tests must pass before completing")
 
         all_files = []
         for p_status in self._phases.values():

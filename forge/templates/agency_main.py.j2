@@ -140,6 +140,27 @@ if get_archetype_tools:
     _archetype_tools = get_archetype_tools()
     _builtin_tools.update(_archetype_tools)
 
+# Load generated domain tools from tools/ directory (mock-backed)
+import importlib
+import sys
+from pathlib import Path as _Path
+_tools_dir = _Path(__file__).parent / "tools"
+if _tools_dir.is_dir():
+    sys.path.insert(0, str(_tools_dir.parent))
+    for _tool_file in sorted(_tools_dir.glob("tool_*.py")):
+        try:
+            _mod_name = f"tools.{_tool_file.stem}"
+            _mod = importlib.import_module(_mod_name)
+            # Look for *_tool attribute (convention from ToolGenerator)
+            for _attr_name in dir(_mod):
+                if _attr_name.endswith("_tool") and _attr_name != "_tool":
+                    _tool_obj = getattr(_mod, _attr_name)
+                    if hasattr(_tool_obj, "name") and hasattr(_tool_obj, "run"):
+                        _builtin_tools[_tool_obj.name] = _tool_obj
+                        logger.info(f"Loaded domain tool: {_tool_obj.name}")
+        except Exception as _e:
+            logger.debug(f"Could not load tool from {_tool_file.name}: {_e}")
+
 {% for tool in shared_tools %}
 # --- Shared Tool: {{ tool.name }} ---
 {% if tool.name in ['http_request', 'send_email', 'query_database', 'read_write_file', 'send_webhook'] %}

@@ -491,15 +491,25 @@ CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
         "docker", "run",
         "--name", container_name,
         "-p", f"{port}:{port}",
-        "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
-        "-e", f"AGENCY_API_KEY={os.environ.get('AGENCY_API_KEY', '')}",
     ]
+    # Pass secrets via env-file to avoid leaking in ps aux
+    env_file = agency_dir / ".env.deploy"
+    env_lines = []
+    for key in ("OPENAI_API_KEY", "AGENCY_API_KEY"):
+        val = os.environ.get(key, "")
+        if val:
+            env_lines.append(f"{key}={val}")
+    if env_lines:
+        env_file.write_text("\n".join(env_lines) + "\n")
+        run_cmd.extend(["--env-file", str(env_file)])
     if detach:
         run_cmd.append("-d")
     run_cmd.append(image_name)
 
     if detach:
         result = subprocess.run(run_cmd, capture_output=True, text=True)
+        if env_file.exists():
+            env_file.unlink()  # Clean up secrets file
         if result.returncode != 0:
             click.secho(f"Failed to start: {result.stderr}", fg="red")
             raise SystemExit(1)
@@ -514,7 +524,11 @@ CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
     else:
         click.echo(f"\n  🌐 Starting on http://localhost:{port}")
         click.echo(f"  Press Ctrl+C to stop\n")
-        subprocess.run(run_cmd)
+        try:
+            subprocess.run(run_cmd)
+        finally:
+            if env_file.exists():
+                env_file.unlink()  # Clean up secrets file
 
 
 @main.command()
