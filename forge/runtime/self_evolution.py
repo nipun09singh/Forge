@@ -39,6 +39,134 @@ class EvolutionRecord:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+@dataclass
+class OptimizationResult:
+    """Result of a DSPy-style prompt optimization."""
+    agent_name: str = ""
+    improved: bool = False
+    old_prompt: str = ""
+    new_prompt: str = ""
+    before_score: float = 0.0
+    after_score: float = 0.0
+    candidates_evaluated: int = 0
+    reason: str = ""
+
+
+class PromptOptimizer:
+    """DSPy-inspired prompt optimization via metric-driven compilation."""
+
+    def __init__(self, llm_client, tracker, metric_fn=None):
+        self.llm_client = llm_client
+        self.tracker = tracker
+        self.metric_fn = metric_fn or self._default_metric
+
+    async def compile(self, agent, n_candidates=3, min_samples=10):
+        """Generate candidate prompts, evaluate each, pick winner, REPLACE (not append)."""
+        agent_name = getattr(agent, "name", "unknown")
+        result = OptimizationResult(agent_name=agent_name)
+
+        if not self.tracker or not self.llm_client:
+            result.reason = "missing tracker or llm_client"
+            return result
+
+        # 1. Collect task history
+        stats = self.tracker.get_agent_stats(agent_name)
+        task_count = stats.get("tasks", 0)
+        if task_count < min_samples:
+            result.reason = f"insufficient data ({task_count}/{min_samples})"
+            return result
+
+        success_rate = stats.get("success_rate", 1.0)
+        avg_quality = stats.get("avg_quality_score", 1.0)
+        failures = self.tracker.get_failure_patterns(limit=30)
+        agent_failures = [f for f in failures if f.get("agent") == agent_name]
+
+        result.before_score = self.metric_fn(success_rate, avg_quality, agent_failures)
+
+        # 2. Ask LLM to generate n_candidates prompt REWRITES
+        old_prompt = agent.system_prompt
+        result.old_prompt = old_prompt
+
+        candidates = []
+        for i in range(n_candidates):
+            rewrite_prompt = (
+                "You are an expert prompt engineer. Given the following system prompt and "
+                "performance data, rewrite the system prompt to address the failure patterns.\n\n"
+                f"CURRENT SYSTEM PROMPT:\n{old_prompt}\n\n"
+                f"PERFORMANCE: success_rate={success_rate:.2f}, avg_quality={avg_quality:.2f}\n"
+                f"FAILURE PATTERNS:\n{json.dumps(agent_failures, indent=2, default=str)}\n\n"
+                "Return a COMPLETE replacement prompt, not an addition. "
+                "The new prompt should address the identified failure patterns while "
+                "preserving the agent's core role and capabilities.\n"
+                f"Candidate {i + 1} of {n_candidates} -- try a different angle than previous attempts."
+            )
+            try:
+                response = await self.llm_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": rewrite_prompt}],
+                    temperature=0.7 + (i * 0.1),
+                )
+                candidate = response.choices[0].message.content or ""
+                if candidate.strip():
+                    candidates.append(candidate.strip())
+            except Exception as e:
+                logger.warning(f"Candidate {i} generation failed: {e}")
+
+        if not candidates:
+            result.reason = "no candidates generated"
+            return result
+
+        # 3. Score each candidate
+        scored = []
+        for candidate in candidates:
+            score = self.metric_fn(success_rate, avg_quality, agent_failures, candidate)
+            scored.append((score, candidate))
+
+        result.candidates_evaluated = len(scored)
+
+        # 4. Pick the winner
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_prompt = scored[0]
+        result.after_score = best_score
+
+        if best_score <= result.before_score:
+            result.reason = "no candidate scored better than current prompt"
+            return result
+
+        # 5. REPLACE agent.system_prompt (not append!)
+        agent.system_prompt = best_prompt
+        result.new_prompt = best_prompt
+        result.improved = True
+        result.reason = "prompt replaced with better candidate"
+
+        logger.info(
+            f"PromptOptimizer: {agent_name} prompt replaced "
+            f"(score {result.before_score:.3f} -> {result.after_score:.3f})"
+        )
+        return result
+
+    @staticmethod
+    def _default_metric(success_rate, avg_quality, failures, candidate_prompt=None):
+        """Default metric: weighted combination of success rate and quality.
+
+        When a candidate_prompt is provided, award a bonus for each failure
+        pattern keyword addressed in the new prompt.
+        """
+        base = success_rate * 0.6 + avg_quality * 0.4
+
+        if candidate_prompt and failures:
+            addressed = 0
+            for f in failures:
+                task_text = f.get("task", "").lower()
+                keywords = [w for w in task_text.split() if len(w) > 3]
+                if any(kw in candidate_prompt.lower() for kw in keywords):
+                    addressed += 1
+            bonus = min(0.15, (addressed / max(len(failures), 1)) * 0.15)
+            return min(1.0, base + bonus)
+
+        return base
+
+
 class SelfEvolution:
     """
     Autonomous self-improvement engine for AI agencies.
@@ -218,6 +346,24 @@ class SelfEvolution:
             cleaned = self.cleanup_prompt_bloat(agents)
             if cleaned > 0:
                 logger.info(f"  Cleaned up {cleaned} old improvement blocks")
+
+        # === DSPy-style prompt compilation ===
+        if agents and self._llm_client:
+            optimizer = PromptOptimizer(self._llm_client, self._tracker)
+            for agent_name, agent in agents.items():
+                try:
+                    result = await optimizer.compile(agent)
+                    if result.improved:
+                        records.append(EvolutionRecord(
+                            target_agent=agent_name,
+                            change_type="prompt_compile",
+                            description=f"DSPy-style prompt rewrite (score {result.before_score:.3f} -> {result.after_score:.3f})",
+                            before_score=result.before_score,
+                            after_score=result.after_score,
+                            applied=True,
+                        ))
+                except Exception as e:
+                    logger.warning(f"Prompt compilation failed for {agent_name}: {e}")
 
         # === DEEP MUTATIONS: Beyond prompt-append ===
         # These mutations change agent configuration, not just prompts.

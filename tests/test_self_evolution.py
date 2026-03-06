@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from forge.runtime.self_evolution import SelfEvolution, EvolutionRecord
+from forge.runtime.self_evolution import SelfEvolution, EvolutionRecord, PromptOptimizer, OptimizationResult
 from forge.runtime.improvement import PerformanceTracker, TaskMetric
 from forge.runtime.memory import SharedMemory
 from forge.runtime.agent import Agent
@@ -252,3 +252,130 @@ class TestMutationRollback:
         record = EvolutionRecord(target_agent="Test", change_type="model_downgrade",
                                  description="test", before_score=0.9, after_score=0.9, applied=True)
         assert evo.rollback_mutation(agent, record) is False
+
+
+def _mock_llm_response(content: str) -> MagicMock:
+    """Create a mock LLM response with the given content."""
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = content
+    return resp
+
+
+class TestPromptOptimizerInit:
+    """Tests for PromptOptimizer initialization."""
+
+    def test_init_with_tracker(self):
+        tracker = PerformanceTracker()
+        client = AsyncMock()
+        optimizer = PromptOptimizer(client, tracker)
+        assert optimizer.tracker is tracker
+        assert optimizer.llm_client is client
+        assert optimizer.metric_fn is not None
+
+    def test_init_with_custom_metric(self):
+        custom_fn = lambda *a, **kw: 0.99
+        optimizer = PromptOptimizer(AsyncMock(), PerformanceTracker(), metric_fn=custom_fn)
+        assert optimizer.metric_fn is custom_fn
+
+
+class TestPromptOptimizerCompile:
+    """Tests for PromptOptimizer.compile()."""
+
+    @pytest.mark.asyncio
+    async def test_skips_with_insufficient_data(self):
+        """compile() should skip when agent has fewer than min_samples tasks."""
+        tracker = PerformanceTracker()
+        for i in range(3):
+            tracker.record(TaskMetric(
+                agent_name="TestAgent", task_preview=f"task_{i}",
+                success=True, quality_score=0.8, duration_seconds=5.0,
+            ))
+        client = AsyncMock()
+        optimizer = PromptOptimizer(client, tracker)
+        agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
+        result = await optimizer.compile(agent)
+        assert not result.improved
+        assert "insufficient data" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_generates_candidates_via_llm(self):
+        """compile() should call the LLM to generate candidate prompt rewrites."""
+        tracker = _make_tracker_with_data("TestAgent", successes=8, failures=4)
+        client = AsyncMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_mock_llm_response("Improved prompt that handles failed_task errors better")
+        )
+        optimizer = PromptOptimizer(client, tracker)
+        agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
+        result = await optimizer.compile(agent, n_candidates=3, min_samples=5)
+        assert client.chat.completions.create.call_count == 3
+        assert result.candidates_evaluated == 3
+
+    @pytest.mark.asyncio
+    async def test_picks_best_candidate(self):
+        """compile() should pick the highest-scoring candidate."""
+        tracker = _make_tracker_with_data("TestAgent", successes=7, failures=5)
+        client = AsyncMock()
+        call_count = 0
+
+        async def varying_responses(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                return _mock_llm_response("Better prompt addressing failed_task issues directly")
+            return _mock_llm_response("Generic improvement without specifics")
+
+        client.chat.completions.create = AsyncMock(side_effect=varying_responses)
+        optimizer = PromptOptimizer(client, tracker)
+        agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
+        result = await optimizer.compile(agent, n_candidates=3, min_samples=5)
+        if result.improved:
+            assert "failed_task" in result.new_prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_replaces_prompt_not_appends(self):
+        """compile() must REPLACE the system prompt entirely, not append."""
+        tracker = _make_tracker_with_data("TestAgent", successes=7, failures=5)
+        client = AsyncMock()
+        new_prompt_text = "Completely new prompt addressing failed_task patterns"
+        client.chat.completions.create = AsyncMock(
+            return_value=_mock_llm_response(new_prompt_text)
+        )
+        optimizer = PromptOptimizer(client, tracker)
+        original = "Original system prompt for test agent"
+        agent = Agent(name="TestAgent", role="test", system_prompt=original)
+        result = await optimizer.compile(agent, n_candidates=1, min_samples=5)
+        if result.improved:
+            assert original not in agent.system_prompt
+            assert agent.system_prompt == new_prompt_text
+
+    @pytest.mark.asyncio
+    async def test_stores_old_prompt_for_rollback(self):
+        """compile() must store the old prompt in the result for rollback."""
+        tracker = _make_tracker_with_data("TestAgent", successes=7, failures=5)
+        client = AsyncMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_mock_llm_response("New prompt addressing failed_task errors")
+        )
+        optimizer = PromptOptimizer(client, tracker)
+        original = "Original prompt to preserve for rollback"
+        agent = Agent(name="TestAgent", role="test", system_prompt=original)
+        result = await optimizer.compile(agent, n_candidates=1, min_samples=5)
+        assert result.old_prompt == original
+
+    @pytest.mark.asyncio
+    async def test_no_improvement_when_no_candidates_score_better(self):
+        """compile() should not replace prompt if no candidate scores better."""
+        tracker = _make_tracker_with_data("TestAgent", successes=10, failures=0)
+        client = AsyncMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_mock_llm_response("Generic text")
+        )
+        optimizer = PromptOptimizer(client, tracker)
+        original = "Original prompt"
+        agent = Agent(name="TestAgent", role="test", system_prompt=original)
+        result = await optimizer.compile(agent, n_candidates=2, min_samples=5)
+        assert not result.improved
+        assert agent.system_prompt == original
+
