@@ -16,7 +16,6 @@ from forge.core.llm import LLMClient
 from forge.core.quality import BlueprintEvaluator, QualityRubric, QualityScore, QualityDimension, format_quality_report
 from forge.core.critic import BlueprintCritic, RefinementLoop, CritiqueResult
 from forge.core.archetypes import inject_archetypes, UNIVERSAL_ARCHETYPES
-from forge.core.ecosystem import ForgeEcosystem
 
 __all__ = [
     "AgencyBlueprint",
@@ -27,7 +26,6 @@ __all__ = [
     "BlueprintEvaluator",
     "CritiqueResult",
     "DomainAnalyzer",
-    "ForgeEcosystem",
     "ForgeEngine",
     "LLMClient",
     "QualityDimension",

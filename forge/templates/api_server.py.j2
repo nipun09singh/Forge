@@ -285,30 +285,6 @@ async def delete_schedule(schedule_id: str):
     raise HTTPException(status_code=404, detail="Schedule not found")
 
 
-# ═══════════════════════════════════════════════════════════
-# Revenue & Analytics Endpoints
-# ═══════════════════════════════════════════════════════════
-
-@app.get("/api/analytics/revenue", dependencies=[Depends(verify_api_key)])
-async def get_revenue():
-    """Get revenue tracking and ROI summary."""
-    if not _agency or not hasattr(_agency, '_revenue_tracker'):
-        return {"total_value_generated_usd": 0, "message": "Revenue tracking not initialized"}
-    
-    cost = _event_log.cost_tracker.total_cost_usd if _event_log else 0
-    return _agency._revenue_tracker.get_roi_summary(agency_cost_usd=cost)
-
-
-@app.get("/api/analytics/predictions", dependencies=[Depends(verify_api_key)])
-async def get_predictions():
-    """Get failure prediction statistics."""
-    if not _agency or not hasattr(_agency, '_failure_predictor'):
-        return {"message": "Failure predictor not initialized"}
-    return {
-        "predictor": repr(_agency._failure_predictor),
-        "agents_tracked": len(_agency._failure_predictor._task_history),
-    }
-
 
 @app.get("/api/analytics/model-routing", dependencies=[Depends(verify_api_key)])
 async def get_model_routing():
@@ -316,55 +292,6 @@ async def get_model_routing():
     if not _agency or not hasattr(_agency, '_model_router'):
         return {"message": "Model routing not initialized"}
     return _agency._model_router.get_stats()
-
-
-# ═══════════════════════════════════════════════════════════
-# Customer Communication Endpoints
-# ═══════════════════════════════════════════════════════════
-
-@app.get("/api/customer/satisfaction", dependencies=[Depends(verify_api_key)])
-async def get_satisfaction(customer_id: str = ""):
-    """Get customer satisfaction scores (CSAT)."""
-    if not _agency or not hasattr(_agency, '_customer_comms'):
-        return {"csat_score": 0, "message": "Customer comms not initialized"}
-    return _agency._customer_comms.get_satisfaction_score(customer_id)
-
-
-class FeedbackRequest(BaseModel):
-    customer_id: str
-    task_id: str = ""
-    agent_name: str = ""
-    rating: int = 0
-    sentiment: str = ""
-    comment: str = ""
-
-
-@app.post("/api/customer/feedback", dependencies=[Depends(verify_api_key)])
-async def submit_feedback(request: FeedbackRequest):
-    """Submit customer feedback on agent performance."""
-    if not _agency or not hasattr(_agency, '_customer_comms'):
-        raise HTTPException(status_code=503, detail="Customer comms not initialized")
-    
-    from forge.runtime.customer_comms import CustomerFeedback
-    feedback = CustomerFeedback(
-        customer_id=request.customer_id,
-        task_id=request.task_id,
-        agent_name=request.agent_name,
-        rating=request.rating,
-        sentiment=request.sentiment,
-        comment=request.comment,
-    )
-    _agency._customer_comms.collect_feedback(feedback)
-    return {"received": True, "feedback_id": feedback.id}
-
-
-@app.get("/api/customer/notifications", dependencies=[Depends(verify_api_key)])
-async def get_notifications(customer_id: str = "", limit: int = 50):
-    """Get notification history."""
-    if not _agency or not hasattr(_agency, '_customer_comms'):
-        return {"notifications": []}
-    return {"notifications": _agency._customer_comms.get_notifications(customer_id, limit)}
-
 
 # ═══════════════════════════════════════════════════════════
 # Checkpointing Endpoints
@@ -400,34 +327,6 @@ async def restore_checkpoint(checkpoint_id: str):
         return {"restored": success, "checkpoint_id": checkpoint_id}
     except RuntimeError as e:
         return {"restored": False, "error": str(e)}
-
-
-# ═══════════════════════════════════════════════════════════
-# Negotiation Endpoints
-# ═══════════════════════════════════════════════════════════
-
-@app.get("/api/negotiations", dependencies=[Depends(verify_api_key)])
-async def get_negotiations(limit: int = 20):
-    """Get negotiation history."""
-    if not _agency or not hasattr(_agency, '_negotiation_engine'):
-        return {"negotiations": []}
-    return {"negotiations": _agency._negotiation_engine.get_history(limit)}
-
-
-# ═══════════════════════════════════════════════════════════
-# A/B Testing Endpoints
-# ═══════════════════════════════════════════════════════════
-
-@app.get("/api/experiments", dependencies=[Depends(verify_api_key)])
-async def get_experiments():
-    """Get A/B test results."""
-    if not _agency or not hasattr(_agency, '_ab_test_manager'):
-        return {"active": [], "completed": []}
-    return {
-        "active": _agency._ab_test_manager.get_active_tests(),
-        "completed": _agency._ab_test_manager.get_completed_tests(),
-    }
-
 
 class ProjectRequest(BaseModel):
     """Request to build a complete project."""

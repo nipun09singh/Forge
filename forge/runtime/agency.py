@@ -18,7 +18,6 @@ from forge.runtime.messages import AgentMessage, MessageType, MessageBus
 from forge.runtime.checkpointing import CheckpointStore
 from forge.runtime.scheduler import Scheduler, TaskSchedule
 from forge.runtime.workspace import WorkspaceManager
-from forge.runtime.project_executor import ProjectExecutor, ProjectResult
 from forge.runtime.inbound import InboundProcessor
 from forge.runtime.self_evolution import SelfEvolution
 from forge.runtime.agent_spawner import AgentSpawner
@@ -64,13 +63,8 @@ class Agency:
         self.inbound = InboundProcessor(execute_fn=self.execute)
         self.self_evolution = SelfEvolution()
         self.agent_spawner = AgentSpawner()
-        self.project_executor = ProjectExecutor()
-        # Note: These are kept for backward compatibility.
-        # Prefer agency.execute_project() for new code.
         self.stress_lab = StressLab(agency=self)
         self.orchestrator = OrchestratorAgent(model=model)
-        # Note: These are kept for backward compatibility.
-        # Prefer agency.execute_project() for new code.
 
         # Strategic planner for complex task decomposition
         self.planner = Planner(model=model)

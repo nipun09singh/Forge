@@ -26,16 +26,6 @@ except ImportError:
     Urgency = None
 
 try:
-    from forge.runtime.revenue_tracker import RevenueTracker
-except ImportError:
-    RevenueTracker = None
-
-try:
-    from forge.runtime.failure_predictor import FailurePredictor
-except ImportError:
-    FailurePredictor = None
-
-try:
     from forge.runtime.model_router import ModelRouter
 except ImportError:
     ModelRouter = None
@@ -60,21 +50,6 @@ try:
     from forge.runtime.messages import MessageBus
 except ImportError:
     MessageBus = None
-
-try:
-    from forge.runtime.customer_comms import CustomerCommunicationHub
-except ImportError:
-    CustomerCommunicationHub = None
-
-try:
-    from forge.runtime.negotiation import NegotiationEngine
-except ImportError:
-    NegotiationEngine = None
-
-try:
-    from forge.runtime.ab_testing import ABTestManager
-except ImportError:
-    ABTestManager = None
 
 try:
     from forge.runtime.guardrails import GuardrailsEngine, ContentFilter, ActionLimiter, ScopeGuard
@@ -216,12 +191,6 @@ def build_agency() -> tuple[Agency, EventLog]:
             scope_guard=ScopeGuard(),
         )
 
-    # ─── Revenue Tracking (optional) ──────────────────────
-    revenue_tracker = RevenueTracker() if RevenueTracker else None
-
-    # ─── Failure Prediction (optional) ────────────────────
-    failure_predictor = FailurePredictor(performance_tracker=performance_tracker) if FailurePredictor else None
-
     # ─── Smart Model Routing (optional) ──────────────────
     model_router = None
     if ModelRouter:
@@ -231,22 +200,9 @@ def build_agency() -> tuple[Agency, EventLog]:
             enabled=os.getenv("FORGE_SMART_ROUTING", "false").lower() == "true",
         )
 
-    # ─── Customer Communication (optional) ────────────────
-    customer_comms = None
-    if CustomerCommunicationHub:
-        customer_comms = CustomerCommunicationHub(
-            webhook_url=os.getenv("CUSTOMER_WEBHOOK_URL", ""),
-            memory=memory,
-        )
-
-    # ─── Negotiation & A/B Testing (optional) ─────────────
-    negotiation_engine = NegotiationEngine() if NegotiationEngine else None
-    ab_test_manager = ABTestManager() if ABTestManager else None
-
     # ─── Wire archetype tools to real infrastructure ───────
     if set_shared_infrastructure:
         set_shared_infrastructure(
-            memory=memory,
             perf_tracker=performance_tracker,
             cost_tracker=cost_tracker,
             event_log=event_log,
@@ -311,7 +267,6 @@ def build_agency() -> tuple[Agency, EventLog]:
         lead={{ team.name | pyname }}_lead,
         {% endif %}
         agents={{ team.name | pyname }}_agents,
-        shared_memory=memory,
     )
     agency.add_team({{ team.name | pyname }}_team)
     {% endfor %}
@@ -357,19 +312,13 @@ def build_agency() -> tuple[Agency, EventLog]:
         agency._build_loop = build_loop
 
     # Attach advanced features to agency for API access
-    agency._revenue_tracker = revenue_tracker
-    agency._failure_predictor = failure_predictor
     agency._model_router = model_router
-    agency._customer_comms = customer_comms
-    agency._negotiation_engine = negotiation_engine
-    agency._ab_test_manager = ab_test_manager
 
     # ─── Level 3-5: Autonomous Operation ───────────────────
     if _has_autonomous:
         agency.inbound.poll_interval = 30.0
         agency.self_evolution.set_infrastructure(
             tracker=performance_tracker,
-            memory=memory,
             llm_client=agency._llm_client,
         )
         agency.agent_spawner.set_infrastructure(
@@ -385,10 +334,6 @@ def build_agency() -> tuple[Agency, EventLog]:
     memory.store("policy:refund", "Full refund within 30 days. Pro-rated after.", author="system", tags=["policy"])
     memory.store("policy:escalation", "Escalate to human after 2 failed resolution attempts.", author="system", tags=["policy"])
     memory.store("policy:response_time", "First response within 5 minutes. Resolution within 24 hours.", author="system", tags=["policy", "sla"])
-
-    if revenue_tracker:
-        from forge.runtime.revenue_tracker import RevenueEvent
-        revenue_tracker.record(RevenueEvent(event_type="task_automated", agent_name="System", value_usd=0, description="Agency initialized"))
 
     logger.info("Seeded initial policies and configuration")
 
@@ -479,8 +424,6 @@ async def main():
             print(f"\n📊 {agency.get_status()}")
             print(f"💰 Costs: {event_log.cost_tracker.get_summary()}")
             print(f"📝 Events: {event_log.get_summary()}")
-            if hasattr(agency, '_revenue_tracker') and agency._revenue_tracker:
-                print(f"💰 Revenue: ${agency._revenue_tracker.get_total_revenue():.2f}")
             if hasattr(agency, '_model_router') and agency._model_router:
                 print(f"🔀 Model routing: {agency._model_router.get_stats()}")
             continue
@@ -547,15 +490,6 @@ async def main():
 
         print(f"\n✅ Result (success={result.success}):\n{result.output}\n")
 
-        # Auto-track revenue and failure outcomes
-        if result.success:
-            if hasattr(agency, '_revenue_tracker') and agency._revenue_tracker:
-                agency._revenue_tracker.record_task_completion("agency")
-            if hasattr(agency, '_failure_predictor') and agency._failure_predictor:
-                agency._failure_predictor.record_outcome("agency", True)
-        else:
-            if hasattr(agency, '_failure_predictor') and agency._failure_predictor:
-                agency._failure_predictor.record_outcome("agency", False)
 
         trace_events = event_log.get_trace(trace.trace_id)
         if trace_events:
