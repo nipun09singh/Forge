@@ -1,7 +1,7 @@
 """Hard phase gates for the orchestrator agent loop.
 
 Enforces that agents MUST complete each phase before advancing:
-RESEARCH → PLAN_SPEC → BUILD → TEST → VERIFY
+RESEARCH -> PLAN -> BUILD -> VERIFY -> SHIP
 
 Phase completion is verified by checking concrete artifacts,
 not by trusting the agent's self-report.
@@ -22,39 +22,41 @@ logger = logging.getLogger(__name__)
 class Phase(str, Enum):
     """Orchestrator execution phases."""
     RESEARCH = "research"
-    PLAN_SPEC = "plan_spec"
+    PLAN = "plan"
     BUILD = "build"
-    TEST = "test"
     VERIFY = "verify"
+    SHIP = "ship"
     COMPLETE = "complete"
 
 
 # Minimum requirements to exit each phase
 PHASE_REQUIREMENTS = {
     Phase.RESEARCH: {
-        "min_iterations": 2,
-        "required_tools": ["browse_web", "web_search"],  # Must use at least one
-        "description": "Research the domain, APIs, and requirements before building",
+        "min_web_searches": 3,
+        "min_sites_browsed": 2,
+        "required_tools": ["browse_web", "web_search"],
+        "description": "Research the domain, APIs, and requirements before building.",
     },
-    Phase.PLAN_SPEC: {
+    Phase.PLAN: {
         "must_create_spec": True,
         "spec_patterns": ["spec", "plan", "architecture", "design", "ARCHITECTURE"],
-        "description": "Create a project specification: architecture, file structure, dependencies, and acceptance criteria",
+        "description": "Create a project specification",
     },
     Phase.BUILD: {
-        "min_files": 2,
-        "required_extensions": [".py"],  # Must create at least one Python file
+        "min_files": 3,
+        "required_extensions": [".py"],
         "description": "Create the project structure and implementation files",
     },
-    Phase.TEST: {
-        "must_run_tests": True,
-        "test_patterns": ["test_", "_test.py", "pytest", "unittest"],
-        "description": "Write and run tests. Fix failures before proceeding.",
-    },
     Phase.VERIFY: {
+        "must_run_tests": True,
         "must_have_readme": True,
         "must_have_requirements": True,
-        "description": "Add documentation, requirements.txt, and verify quality",
+        "description": "Run tests (must pass), ensure README and requirements.txt exist",
+    },
+    Phase.SHIP: {
+        "must_git_init": True,
+        "must_git_commit": True,
+        "description": "Initialize git repository and commit all files",
     },
 }
 
@@ -70,29 +72,20 @@ class PhaseStatus:
     files_created: list[str] = field(default_factory=list)
     tests_run: bool = False
     test_passed: bool = False
+    web_searches: int = 0
+    sites_browsed: int = 0
+    research_artifact_saved: bool = False
+    git_initialized: bool = False
+    git_committed: bool = False
 
 
 class PhaseGateEnforcer:
     """
     Enforces hard phase gates in the orchestrator loop.
-    
+
     Instead of hoping the agent follows prompt instructions,
     this tracks what the agent HAS DONE and blocks phase transitions
     until requirements are met.
-    
-    Usage:
-        enforcer = PhaseGateEnforcer(project_dir)
-        
-        # In orchestrator loop:
-        phase_msg = enforcer.get_phase_instruction()  # What to tell the agent
-        enforcer.record_tool_use(tool_name)            # After each tool call
-        enforcer.record_file_created(filename)         # After each file creation
-        
-        # Before accepting DONE:
-        can_complete, blockers = enforcer.can_complete()
-        if not can_complete:
-            # Force agent back to incomplete phases
-            feedback = enforcer.get_blocker_feedback()
     """
 
     def __init__(self, project_dir: str | Path):
@@ -118,55 +111,59 @@ class PhaseGateEnforcer:
     def record_tool_use(self, tool_name: str) -> None:
         """Record that a tool was used in the current phase."""
         self._phases[self._current_phase].tools_used.add(tool_name)
+        # Track research-specific counters
+        if tool_name == "web_search":
+            self._phases[Phase.RESEARCH].web_searches += 1
+        elif tool_name == "browse_web":
+            self._phases[Phase.RESEARCH].sites_browsed += 1
         # Detect test execution
         if tool_name == "run_command":
-            self._phases[Phase.TEST].tools_used.add(tool_name)
+            self._phases[Phase.VERIFY].tools_used.add(tool_name)
 
     def is_tool_allowed(self, tool_name: str) -> tuple[bool, str]:
-        """Check if a tool is appropriate for the current phase.
-        
-        Returns (allowed, reason). Blocks tools that would skip phases:
-        - RESEARCH: only browse_web, web_search, read_write_file (for notes)
-        - BUILD: no restrictions (needs all tools to create project)
-        - TEST: no restrictions (needs run_command for tests)
-        - VERIFY: no restrictions
-        """
+        """Check if a tool is appropriate for the current phase."""
         if self._current_phase == Phase.RESEARCH:
-            blocked_in_research = {"run_command", "git_operation", "query_database"}
-            if tool_name in blocked_in_research:
+            allowed_in_research = {"browse_web", "web_search", "read_write_file"}
+            if tool_name not in allowed_in_research:
                 return False, f"Tool '{tool_name}' not allowed during RESEARCH phase. Use browse_web or web_search to research first."
-        elif self._current_phase == Phase.PLAN_SPEC:
-            blocked_in_planning = {"run_command", "git_operation", "query_database"}
-            if tool_name in blocked_in_planning:
-                return False, f"Tool '{tool_name}' not allowed during PLAN/SPEC phase. Create your project specification first using read_write_file."
+        elif self._current_phase == Phase.PLAN:
+            allowed_in_plan = {"read_write_file", "web_search", "browse_web"}
+            if tool_name not in allowed_in_plan:
+                return False, f"Tool '{tool_name}' not allowed during PLAN phase. Create your project specification first using read_write_file."
+        elif self._current_phase == Phase.SHIP:
+            allowed_in_ship = {"run_command", "read_write_file"}
+            if tool_name not in allowed_in_ship:
+                return False, f"Tool '{tool_name}' not allowed during SHIP phase. Use run_command for git operations."
         return True, ""
 
     def record_command_output(self, command: str, output: str) -> None:
-        """Record command execution to detect test runs.
-        
-        Uses strict matching: command must contain pytest/unittest to count.
-        Simple 'echo passed' does not satisfy the test gate.
-        """
-        # Require actual test framework command — not just 'passed' in output
+        """Record command execution to detect test runs and git operations."""
+        # Detect git operations
+        if "git init" in command:
+            self._phases[Phase.SHIP].git_initialized = True
+        if "git commit" in command:
+            self._phases[Phase.SHIP].git_committed = True
+
+        # Require actual test framework command
         test_commands = ["pytest", "python -m pytest", "python -m unittest", "unittest"]
         is_test_command = any(tc in command for tc in test_commands)
-        
+
         if not is_test_command:
             return  # Not a real test run
-        
-        self._phases[Phase.TEST].tests_run = True
-        
-        # Parse test results — require explicit pass pattern from test framework
+
+        self._phases[Phase.VERIFY].tests_run = True
+
+        # Parse test results
         fail_indicators = ["FAILED", "ERRORS", "errors=", "failures="]
         pass_indicators = ["passed", "OK"]
-        
+
         has_failures = any(f in output for f in fail_indicators)
         has_passes = any(p in output for p in pass_indicators)
-        
+
         if has_passes and not has_failures:
-            self._phases[Phase.TEST].test_passed = True
+            self._phases[Phase.VERIFY].test_passed = True
         else:
-            self._phases[Phase.TEST].test_passed = False
+            self._phases[Phase.VERIFY].test_passed = False
 
     def record_file_created(self, filepath: str) -> None:
         """Record a file creation."""
@@ -174,6 +171,9 @@ class PhaseGateEnforcer:
         # Also record in BUILD phase regardless of current phase
         if filepath not in self._phases[Phase.BUILD].files_created:
             self._phases[Phase.BUILD].files_created.append(filepath)
+        # Detect research artifact (JSON file saved during RESEARCH)
+        if filepath.endswith(".json") and self._current_phase == Phase.RESEARCH:
+            self._phases[Phase.RESEARCH].research_artifact_saved = True
 
     def _try_advance(self) -> None:
         """Try to advance to the next phase if current requirements are met."""
@@ -184,12 +184,15 @@ class PhaseGateEnforcer:
         reqs = PHASE_REQUIREMENTS[self._current_phase]
 
         if self._current_phase == Phase.RESEARCH:
-            research_tools = reqs["required_tools"]
-            used_research = any(t in status.tools_used for t in research_tools)
-            if status.iterations_in_phase >= reqs["min_iterations"] and used_research:
-                self._advance_to(Phase.PLAN_SPEC)
+            rs = self._phases[Phase.RESEARCH]
+            has_searches = rs.web_searches >= reqs["min_web_searches"]
+            has_browsed = rs.sites_browsed >= reqs["min_sites_browsed"]
+            has_artifact = rs.research_artifact_saved
+            if has_searches and has_browsed and has_artifact:
+                self._advance_to(Phase.PLAN)
 
-        elif self._current_phase == Phase.PLAN_SPEC:
+        elif self._current_phase == Phase.PLAN:
+            # NO escape hatch -- must create a spec file
             spec_patterns = reqs["spec_patterns"]
             all_files = []
             for p_status in self._phases.values():
@@ -198,17 +201,13 @@ class PhaseGateEnforcer:
                 any(pat.lower() in f.lower() for pat in spec_patterns)
                 for f in all_files
             )
-            if has_spec or status.iterations_in_phase >= 3:
+            if has_spec:
                 self._advance_to(Phase.BUILD)
 
         elif self._current_phase == Phase.BUILD:
-            has_files = len([f for f in status.files_created 
+            has_files = len([f for f in status.files_created
                            if any(f.endswith(ext) for ext in reqs["required_extensions"])]) >= reqs["min_files"]
             if has_files:
-                self._advance_to(Phase.TEST)
-
-        elif self._current_phase == Phase.TEST:
-            if status.tests_run and status.test_passed:
                 self._advance_to(Phase.VERIFY)
 
         elif self._current_phase == Phase.VERIFY:
@@ -217,23 +216,31 @@ class PhaseGateEnforcer:
                 all_files.extend(p_status.files_created)
             has_readme = any("readme" in f.lower() for f in all_files)
             has_requirements = any("requirements" in f.lower() for f in all_files)
-            if has_readme and has_requirements:
-                status.completed = True
+            tests_ok = self._phases[Phase.VERIFY].tests_run and self._phases[Phase.VERIFY].test_passed
+            if has_readme and has_requirements and tests_ok:
+                self._advance_to(Phase.SHIP)
+
+        elif self._current_phase == Phase.SHIP:
+            ss = self._phases[Phase.SHIP]
+            if ss.git_initialized and ss.git_committed:
+                self._advance_to(Phase.COMPLETE)
 
     def _advance_to(self, phase: Phase) -> None:
         """Advance to the next phase."""
         self._phases[self._current_phase].completed = True
         self._current_phase = phase
-        self._phases[phase].entered = True
-        logger.info(f"  📋 Phase gate: advanced to {phase.value.upper()}")
+        if phase != Phase.COMPLETE:
+            self._phases[phase].entered = True
+        logger.info(f"  Phase gate: advanced to {phase.value.upper()}")
 
     def get_phase_instruction(self) -> str:
         """Get the current phase instruction to inject into the conversation."""
         phase = self._current_phase
+        if phase == Phase.COMPLETE:
+            return ""
         status = self._phases[phase]
-        reqs = PHASE_REQUIREMENTS[phase]
 
-        header = f"\n═══ CURRENT PHASE: {phase.value.upper()} (iteration {status.iterations_in_phase}) ═══\n"
+        header = f"\n=== CURRENT PHASE: {phase.value.upper()} (iteration {status.iterations_in_phase}) ===\n"
 
         if phase == Phase.RESEARCH:
             return (
@@ -242,9 +249,10 @@ class PhaseGateEnforcer:
                 "- Read API documentation for any services needed\n"
                 "- Understand best practices for this domain\n"
                 "- Study similar projects and their architecture\n"
-                "You cannot proceed to BUILD until you've done research.\n"
+                "Requirements: >=3 web searches, >=2 sites browsed, save research artifact (JSON).\n"
+                "You cannot proceed to PLAN until you've done research.\n"
             )
-        elif phase == Phase.PLAN_SPEC:
+        elif phase == Phase.PLAN:
             return (
                 header +
                 "Create a PROJECT SPECIFICATION before building:\n"
@@ -253,6 +261,7 @@ class PhaseGateEnforcer:
                 "- Dependencies: what packages/APIs are needed\n"
                 "- Acceptance criteria: how to verify it works\n"
                 "Use read_write_file to create a spec document (e.g., SPEC.md or ARCHITECTURE.md).\n"
+                "You MUST create this file. There is no escape hatch.\n"
             )
         elif phase == Phase.BUILD:
             return (
@@ -261,16 +270,8 @@ class PhaseGateEnforcer:
                 "- Create proper project structure\n"
                 "- Implement all required features\n"
                 "- Install dependencies with run_command\n"
+                f"- Must create >=3 .py files\n"
                 f"Files created so far: {len(status.files_created)}\n"
-            )
-        elif phase == Phase.TEST:
-            return (
-                header +
-                "You MUST write and run tests before completing.\n"
-                "- Create test files (test_*.py)\n"
-                "- Run tests with run_command (pytest or unittest)\n"
-                "- Fix any failures\n"
-                "You cannot mark DONE until tests pass.\n"
             )
         elif phase == Phase.VERIFY:
             all_files = []
@@ -281,14 +282,28 @@ class PhaseGateEnforcer:
                 missing.append("README.md")
             if not any("requirements" in f.lower() for f in all_files):
                 missing.append("requirements.txt")
+            tests_info = ""
+            if not self._phases[Phase.VERIFY].tests_run:
+                tests_info = "- You MUST run tests (pytest or unittest)\n"
+            elif not self._phases[Phase.VERIFY].test_passed:
+                tests_info = "- Tests ran but FAILED. Fix and re-run.\n"
+            else:
+                tests_info = "- Tests passed\n"
             return (
                 header +
-                "Final verification phase.\n" +
+                "Verification phase: run tests and ensure docs exist.\n" +
+                tests_info +
                 (f"Missing required files: {', '.join(missing)}\n" if missing else "") +
                 "- Ensure README has setup instructions\n"
                 "- Ensure requirements.txt lists all dependencies\n"
-                "- Review code quality\n"
-                "When everything is ready, say DONE.\n"
+            )
+        elif phase == Phase.SHIP:
+            return (
+                header +
+                "SHIP phase: prepare for delivery.\n"
+                "- Initialize git repository: run_command('git init')\n"
+                "- Stage and commit all files\n"
+                "- Use run_command and read_write_file only.\n"
             )
         return ""
 
@@ -297,20 +312,20 @@ class PhaseGateEnforcer:
         blockers = []
 
         if not self._phases[Phase.RESEARCH].completed:
-            blockers.append("RESEARCH phase not completed — must research before building")
+            blockers.append("RESEARCH phase not completed")
 
-        if not self._phases[Phase.PLAN_SPEC].completed:
-            blockers.append("PLAN/SPEC phase not completed — must create project specification before building")
+        if not self._phases[Phase.PLAN].completed:
+            blockers.append("PLAN phase not completed")
 
         build_status = self._phases[Phase.BUILD]
         py_files = [f for f in build_status.files_created if f.endswith(".py")]
-        if len(py_files) < 2:
-            blockers.append(f"BUILD phase incomplete — only {len(py_files)} Python files created (need ≥2)")
+        if len(py_files) < 3:
+            blockers.append(f"BUILD phase incomplete -- only {len(py_files)} Python files created (need >=3)")
 
-        if not self._phases[Phase.TEST].tests_run:
-            blockers.append("TEST phase not completed — must run tests before completing")
-        elif not self._phases[Phase.TEST].test_passed:
-            blockers.append("TEST phase not passed — tests must pass before completing")
+        if not self._phases[Phase.VERIFY].tests_run:
+            blockers.append("VERIFY phase not completed -- must run tests before completing")
+        elif not self._phases[Phase.VERIFY].test_passed:
+            blockers.append("VERIFY phase not passed -- tests must pass before completing")
 
         all_files = []
         for p_status in self._phases.values():
@@ -320,6 +335,11 @@ class PhaseGateEnforcer:
         if not any("requirements" in f.lower() for f in all_files):
             blockers.append("VERIFY: Missing requirements.txt")
 
+        if not self._phases[Phase.SHIP].git_initialized:
+            blockers.append("SHIP phase not completed -- must initialize git repository")
+        if not self._phases[Phase.SHIP].git_committed:
+            blockers.append("SHIP phase not completed -- must commit files to git")
+
         return (len(blockers) == 0, blockers)
 
     def get_blocker_feedback(self) -> str:
@@ -328,8 +348,8 @@ class PhaseGateEnforcer:
         if can_done:
             return ""
         return (
-            "⚠️ You cannot complete yet. The following phase requirements are unmet:\n" +
-            "\n".join(f"  • {b}" for b in blockers) +
+            "You cannot complete yet. The following phase requirements are unmet:\n" +
+            "\n".join(f"  - {b}" for b in blockers) +
             "\n\nPlease address these before saying DONE."
         )
 
