@@ -17,8 +17,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import pathlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -212,6 +213,83 @@ class SelfEvolution:
         self._history: list[EvolutionRecord] = []
         self._running = False
         self._cycle_count = 0
+        self._pending_rollbacks: list[tuple[str, EvolutionRecord, dict[str, Any]]] = []
+        self._history_file = pathlib.Path.home() / ".forge" / "evolution_history.json"
+        self._load_history()
+
+    def _load_history(self) -> None:
+        """Load evolution history from disk if available."""
+        try:
+            if self._history_file.exists():
+                data = json.loads(self._history_file.read_text(encoding="utf-8"))
+                for entry in data:
+                    self._history.append(EvolutionRecord(**entry))
+                logger.info(f"Loaded {len(data)} evolution history records from {self._history_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load evolution history: {e}")
+
+    def _save_history(self) -> None:
+        """Persist evolution history to disk."""
+        try:
+            self._history_file.parent.mkdir(parents=True, exist_ok=True)
+            data = [asdict(r) for r in self._history]
+            self._history_file.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to save evolution history: {e}")
+
+    def _snapshot_agent(self, agent: Any) -> dict[str, Any]:
+        """Capture agent configuration for rollback."""
+        snap: dict[str, Any] = {}
+        for attr in ("model", "temperature", "enable_reflection", "max_iterations", "system_prompt"):
+            if hasattr(agent, attr):
+                snap[attr] = getattr(agent, attr)
+        return snap
+
+    def _restore_agent(self, agent: Any, snapshot: dict[str, Any]) -> None:
+        """Restore agent configuration from snapshot."""
+        for attr, value in snapshot.items():
+            if hasattr(agent, attr):
+                setattr(agent, attr, value)
+
+    async def _process_pending_rollbacks(self, agents: dict[str, Any] | None) -> list[EvolutionRecord]:
+        """Check pending rollbacks from previous cycle — compare pre vs post stats."""
+        if not agents or not self._pending_rollbacks or not self._tracker:
+            self._pending_rollbacks.clear()
+            return []
+
+        rollback_records: list[EvolutionRecord] = []
+        remaining: list[tuple[str, EvolutionRecord, dict[str, Any]]] = []
+
+        for agent_name, record, snapshot in self._pending_rollbacks:
+            if agent_name not in agents:
+                continue
+
+            agent = agents[agent_name]
+            post_stats = self._tracker.get_agent_stats(agent_name) if hasattr(self._tracker, "get_agent_stats") else {}
+            if not post_stats:
+                continue
+
+            post_success = post_stats.get("success_rate", 1.0)
+            pre_score = record.before_score
+
+            if post_success < pre_score - 0.1:
+                self._restore_agent(agent, snapshot)
+                record.applied = False
+                logger.info(
+                    f"  ⏪ Deferred rollback: {record.change_type} for {agent_name} "
+                    f"(pre={pre_score:.2f} → post={post_success:.2f})"
+                )
+                rollback_records.append(EvolutionRecord(
+                    target_agent=agent_name,
+                    change_type=f"rollback_{record.change_type}",
+                    description=f"Rolled back {record.change_type} (pre={pre_score:.2f} → post={post_success:.2f})",
+                    before_score=post_success,
+                    after_score=pre_score,
+                    applied=True,
+                ))
+
+        self._pending_rollbacks.clear()
+        return rollback_records
 
     def set_infrastructure(self, tracker=None, memory=None, llm_client=None):
         """Wire to agency infrastructure."""
@@ -229,8 +307,16 @@ class SelfEvolution:
         logger.info(f"=== Evolution Cycle {self._cycle_count} ===")
         records = []
 
+        # Process deferred rollbacks from previous cycle (now we have post-mutation data)
+        rollback_records = await self._process_pending_rollbacks(agents)
+        if rollback_records:
+            records.extend(rollback_records)
+
         if not self._tracker or not self._llm_client:
             logger.warning("Evolution skipped: missing tracker or LLM client")
+            self._history.extend(records)
+            if records:
+                self._save_history()
             return records
 
         # 1. OBSERVE: Gather performance data
@@ -239,6 +325,9 @@ class SelfEvolution:
 
         if agency_stats.get("total_tasks", 0) < 5:
             logger.info("Not enough data for evolution (need 5+ tasks)")
+            self._history.extend(records)
+            if records:
+                self._save_history()
             return records
 
         # === DSPy-style prompt compilation ===
@@ -265,6 +354,8 @@ class SelfEvolution:
         _mutation_snapshots: dict[str, dict[str, Any]] = {}
 
         if not agents:
+            self._history.extend(records)
+            self._save_history()
             return records
             
         for agent_name, agent in agents.items():
@@ -281,6 +372,9 @@ class SelfEvolution:
             
             if task_count < 5:
                 continue  # Need enough data
+
+            # Capture pre-mutation snapshot for rollback
+            _mutation_snapshots[agent_name] = self._snapshot_agent(agent)
             
             # Mutation 1: Model routing evolution
             # If agent is expensive but quality is high, try cheaper model
@@ -366,17 +460,18 @@ class SelfEvolution:
                         applied=True,
                     ))
 
-        # After applying deep mutations, schedule a rollback check
+        # Queue deferred rollback checks for next cycle (current stats == pre-mutation)
         mutation_types = {"model_downgrade", "temperature_decrease", "temperature_increase", "enable_reflection", "increase_iterations"}
         mutation_records = [r for r in records if r.change_type in mutation_types]
         for record in mutation_records:
             agent_name = record.target_agent
-            if agent_name in agents:
-                agent = agents[agent_name]
-                rolled_back = await self.rollback_mutation(agent, record)
-                if rolled_back:
-                    logger.info(f"Rolled back {record.change_type} for {agent_name}")
+            if agent_name in agents and agent_name in _mutation_snapshots:
+                self._pending_rollbacks.append(
+                    (agent_name, record, _mutation_snapshots[agent_name])
+                )
 
+        self._history.extend(records)
+        self._save_history()
         logger.info(f"Evolution cycle {self._cycle_count} complete: {len(records)} improvements applied")
         return records
 
@@ -385,7 +480,8 @@ class SelfEvolution:
         self._running = True
         while self._running:
             try:
-                await self.run_evolution_cycle(agents)
+                records = await self.run_evolution_cycle(agents)
+                logger.info(f"Background evolution produced {len(records)} records")
             except Exception as e:
                 logger.error(f"Evolution cycle error: {e}")
             await asyncio.sleep(interval_hours * 3600)
@@ -410,10 +506,13 @@ class SelfEvolution:
 
     def get_stats(self) -> dict[str, Any]:
         """Get evolution statistics."""
+        rollback_count = sum(1 for r in self._history if r.change_type.startswith("rollback_"))
         return {
             "cycles_completed": self._cycle_count,
             "total_improvements": len(self._history),
             "applied_improvements": sum(1 for r in self._history if r.applied),
+            "rollbacks": rollback_count,
+            "pending_rollback_checks": len(self._pending_rollbacks),
             "running": self._running,
         }
 

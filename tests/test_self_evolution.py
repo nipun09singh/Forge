@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import pathlib
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,16 @@ from forge.runtime.self_evolution import SelfEvolution, EvolutionRecord, PromptO
 from forge.runtime.improvement import PerformanceTracker, TaskMetric
 from forge.runtime.memory import SharedMemory
 from forge.runtime.agent import Agent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_history_file(tmp_path, monkeypatch):
+    """Prevent tests from reading/writing the real ~/.forge/evolution_history.json."""
+    fake_file = tmp_path / "evolution_history.json"
+    monkeypatch.setattr(
+        pathlib.Path, "home",
+        staticmethod(lambda: tmp_path),
+    )
 
 
 def _make_tracker_with_data(agent_name="TestAgent", successes=8, failures=2):
@@ -473,8 +484,8 @@ class TestRollbackWiring:
         return tracker
 
     @pytest.mark.asyncio
-    async def test_rollback_called_after_deep_mutations(self):
-        """rollback_mutation IS called after deep mutations are applied."""
+    async def test_rollback_queued_after_deep_mutations(self):
+        """Deep mutations queue deferred rollback checks for next cycle."""
         agent = self._make_agent(model="gpt-4")
         tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
         agent._performance_tracker = tracker
@@ -486,15 +497,13 @@ class TestRollbackWiring:
         client.chat.completions.create = AsyncMock(return_value=resp)
 
         evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
 
-        with patch.object(evo, 'rollback_mutation', new_callable=AsyncMock, return_value=False) as mock_rollback:
-            records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
-            # Deep mutation should have triggered a model_downgrade, so rollback_mutation should be called
-            assert mock_rollback.call_count > 0
-            # Verify it was called with the agent and a mutation record
-            call_args = mock_rollback.call_args
-            assert call_args[0][0] is agent
-            assert call_args[0][1].change_type in {"model_downgrade", "temperature_decrease", "temperature_increase", "enable_reflection", "increase_iterations"}
+        # Mutations applied → rollback checks should be queued (not executed immediately)
+        assert len(evo._pending_rollbacks) > 0
+        queued_agent, queued_record, queued_snapshot = evo._pending_rollbacks[0]
+        assert queued_agent == "TestAgent"
+        assert queued_record.change_type in {"model_downgrade", "temperature_decrease", "temperature_increase", "enable_reflection", "increase_iterations"}
 
     @pytest.mark.asyncio
     async def test_rollback_restores_on_performance_drop(self):
@@ -554,3 +563,187 @@ class TestRollbackWiring:
 
         # The old prompt-append path should be gone
         assert "[Auto-improvement]" not in agent.system_prompt
+
+
+class TestHistoryTracking:
+    """Tests for history population and persistence."""
+
+    def _make_agent(self, name="TestAgent", model="gpt-4", temperature=0.5,
+                    enable_reflection=False, max_iterations=20):
+        agent = Agent(name=name, role="test", system_prompt="Test agent")
+        agent.model = model
+        agent.temperature = temperature
+        agent.enable_reflection = enable_reflection
+        agent.max_iterations = max_iterations
+        return agent
+
+    def _make_tracker_for_agent(self, agent_name, success_rate=0.9, quality=0.8, count=10):
+        tracker = PerformanceTracker()
+        successes = int(count * success_rate)
+        failures = count - successes
+        for i in range(successes):
+            tracker.record(TaskMetric(
+                agent_name=agent_name, task_preview=f"task_{i}",
+                success=True, quality_score=quality, duration_seconds=5.0,
+            ))
+        for i in range(failures):
+            tracker.record(TaskMetric(
+                agent_name=agent_name, task_preview=f"fail_{i}",
+                success=False, quality_score=0.0, duration_seconds=10.0,
+            ))
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_history_populated_after_cycle(self):
+        """_history is populated after run_evolution_cycle produces records."""
+        agent = self._make_agent(model="gpt-4")
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        assert evo.get_history() == []
+
+        records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
+        assert len(records) > 0
+        assert len(evo.get_history()) == len(records)
+        assert evo.get_history()[0]["change"] == records[0].change_type
+
+    @pytest.mark.asyncio
+    async def test_get_stats_reflects_actual_data(self):
+        """get_stats() returns accurate counts based on _history."""
+        agent = self._make_agent(model="gpt-4")
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        stats_before = evo.get_stats()
+        assert stats_before["total_improvements"] == 0
+        assert stats_before["cycles_completed"] == 0
+
+        records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
+        stats_after = evo.get_stats()
+        assert stats_after["cycles_completed"] == 1
+        assert stats_after["total_improvements"] == len(records)
+        assert stats_after["applied_improvements"] == sum(1 for r in records if r.applied)
+
+    @pytest.mark.asyncio
+    async def test_history_persists_to_file(self, tmp_path):
+        """History is saved to and loaded from JSON file."""
+        agent = self._make_agent(model="gpt-4")
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        evo._history_file = tmp_path / "evolution_history.json"
+
+        await evo.run_evolution_cycle(agents={"TestAgent": agent})
+        assert evo._history_file.exists()
+        saved = json.loads(evo._history_file.read_text())
+        assert len(saved) > 0
+
+        # Create a new instance and verify it loads saved history
+        evo2 = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        evo2._history_file = tmp_path / "evolution_history.json"
+        evo2._load_history()
+        assert len(evo2._history) == len(saved)
+
+
+class TestDeferredRollback:
+    """Tests for deferred rollback across cycles."""
+
+    def _make_agent(self, name="TestAgent", model="gpt-4", temperature=0.5,
+                    enable_reflection=False, max_iterations=20):
+        agent = Agent(name=name, role="test", system_prompt="Test agent")
+        agent.model = model
+        agent.temperature = temperature
+        agent.enable_reflection = enable_reflection
+        agent.max_iterations = max_iterations
+        return agent
+
+    def _make_tracker_for_agent(self, agent_name, success_rate=0.9, quality=0.8, count=10):
+        tracker = PerformanceTracker()
+        successes = int(count * success_rate)
+        failures = count - successes
+        for i in range(successes):
+            tracker.record(TaskMetric(
+                agent_name=agent_name, task_preview=f"task_{i}",
+                success=True, quality_score=quality, duration_seconds=5.0,
+            ))
+        for i in range(failures):
+            tracker.record(TaskMetric(
+                agent_name=agent_name, task_preview=f"fail_{i}",
+                success=False, quality_score=0.0, duration_seconds=10.0,
+            ))
+        return tracker
+
+    @pytest.mark.asyncio
+    async def test_deferred_rollback_triggers_on_degradation(self):
+        """Deferred rollback restores agent when performance degrades by next cycle."""
+        agent = self._make_agent(model="gpt-4")
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        await evo.run_evolution_cycle(agents={"TestAgent": agent})
+
+        # Model should have been downgraded
+        assert agent.model == "gpt-4o"
+        assert len(evo._pending_rollbacks) > 0
+
+        # Simulate degraded performance in the tracker for next cycle
+        bad_tracker = self._make_tracker_for_agent("TestAgent", success_rate=0.5, quality=0.4, count=20)
+        evo._tracker = bad_tracker
+        agent._performance_tracker = bad_tracker
+
+        # Run second cycle — deferred rollback should restore model
+        records2 = await evo.run_evolution_cycle(agents={"TestAgent": agent})
+        rollback_records = [r for r in records2 if r.change_type.startswith("rollback_")]
+        assert len(rollback_records) > 0
+        assert agent.model == "gpt-4"  # restored
+
+    @pytest.mark.asyncio
+    async def test_deferred_rollback_skips_when_performance_holds(self):
+        """No rollback when post-mutation performance holds steady."""
+        agent = self._make_agent(model="gpt-4")
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"improvements": []}'
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
+        await evo.run_evolution_cycle(agents={"TestAgent": agent})
+        assert agent.model == "gpt-4o"
+
+        # Performance stays good — no rollback should happen
+        records2 = await evo.run_evolution_cycle(agents={"TestAgent": agent})
+        rollback_records = [r for r in records2 if r.change_type.startswith("rollback_")]
+        assert len(rollback_records) == 0
+        assert agent.model != "gpt-4"  # NOT restored
