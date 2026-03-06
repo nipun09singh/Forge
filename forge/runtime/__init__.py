@@ -9,7 +9,7 @@ from forge.runtime.persistence import MemoryBackend, InMemoryBackend, SQLiteMemo
 from forge.runtime.router import Router
 from forge.runtime.improvement import QualityGate, QualityVerdict, PerformanceTracker, TaskMetric, FeedbackCollector, Feedback, ReflectionEngine
 from forge.runtime.planner import Planner, TaskPlan, PlanStep, StepStatus
-from forge.runtime.observability import EventLog, EventType, Event, TraceContext, CostTracker
+from forge.runtime.observability import EventLog, EventType, Event, TraceContext, CostTracker, PersistentEventStore, OTLPExporter, get_metrics_summary
 from forge.runtime.human import HumanApprovalGate, ApprovalRequest, ApprovalResult, ApprovalDecision, Urgency, WebhookApprovalGate
 from forge.runtime.streaming import StreamingResponse, TokenChunk, stream_llm_response, stream_agent_execution
 from forge.runtime.checkpointing import CheckpointStore
@@ -59,6 +59,9 @@ __all__ = [
     "Event",
     "TraceContext",
     "CostTracker",
+    "PersistentEventStore",
+    "OTLPExporter",
+    "get_metrics_summary",
     "HumanApprovalGate",
     "ApprovalRequest",
     "ApprovalResult",

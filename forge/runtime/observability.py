@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+try:
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    _HAS_OTEL = True
+except ImportError:
+    _HAS_OTEL = False
 
 
 class EventType(str, Enum):
@@ -167,19 +180,252 @@ class CostTracker:
         }
 
 
+class PersistentEventStore:
+    """SQLite-backed event persistence layer.
+
+    Writes every event to a local SQLite database so that data survives
+    process restarts.  The database file is created automatically.
+    """
+
+    _DDL = """
+        CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            agent TEXT NOT NULL DEFAULT '',
+            data JSON,
+            trace_id TEXT NOT NULL DEFAULT '',
+            span_id TEXT NOT NULL DEFAULT '',
+            parent_span_id TEXT NOT NULL DEFAULT '',
+            tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd REAL NOT NULL DEFAULT 0.0,
+            duration_ms REAL NOT NULL DEFAULT 0.0,
+            level TEXT NOT NULL DEFAULT 'info'
+        );
+        CREATE INDEX IF NOT EXISTS idx_events_trace ON events(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_events_type  ON events(event_type);
+        CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent);
+        CREATE INDEX IF NOT EXISTS idx_events_ts    ON events(timestamp);
+    """
+
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            db_path = os.environ.get("FORGE_EVENTS_DB", str(Path.home() / ".forge" / "events.db"))
+        self._db_path = Path(db_path)
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn: sqlite3.Connection | None = None
+        self._init_db()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        return self._conn
+
+    def _init_db(self) -> None:
+        with self._lock:
+            conn = self._get_conn()
+            conn.executescript(self._DDL)
+            conn.commit()
+
+    def persist(self, event: Event) -> None:
+        """Write a single event to SQLite."""
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                "INSERT OR REPLACE INTO events "
+                "(id, timestamp, event_type, agent, data, trace_id, span_id, "
+                "parent_span_id, tokens, cost_usd, duration_ms, level) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.span_id,
+                    event.timestamp,
+                    event.event_type.value,
+                    event.agent_name,
+                    json.dumps(event.data, default=str),
+                    event.trace_id,
+                    event.span_id,
+                    event.parent_span_id,
+                    event.tokens,
+                    event.cost_usd,
+                    event.duration_ms,
+                    event.level,
+                ),
+            )
+            conn.commit()
+
+    def query_events(
+        self,
+        *,
+        trace_id: str | None = None,
+        agent_name: str | None = None,
+        event_type: str | None = None,
+        level: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Query persisted events with optional filters.
+
+        All filter parameters are optional.  ``since`` / ``until`` accept
+        ISO-8601 timestamp strings.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if trace_id:
+            clauses.append("trace_id = ?")
+            params.append(trace_id)
+        if agent_name:
+            clauses.append("agent = ?")
+            params.append(agent_name)
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        if level:
+            clauses.append("level = ?")
+            params.append(level)
+        if since:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM events{where} ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            conn = self._get_conn()
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_by_type(self) -> dict[str, int]:
+        """Return event counts grouped by event_type."""
+        with self._lock:
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT event_type, COUNT(*) as cnt FROM events GROUP BY event_type"
+            ).fetchall()
+        return {r["event_type"]: r["cnt"] for r in rows}
+
+    def total_cost(self) -> float:
+        """Return total tracked cost across all persisted events."""
+        with self._lock:
+            conn = self._get_conn()
+            row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) AS total FROM events").fetchone()
+        return float(row["total"])
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+
+
+class OTLPExporter:
+    """Optional OpenTelemetry exporter.
+
+    Activated only when:
+      1. The ``opentelemetry`` packages are installed, **and**
+      2. ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set in the environment.
+
+    If either condition is not met the exporter silently no-ops.
+    """
+
+    def __init__(self, endpoint: str | None = None) -> None:
+        self._enabled = False
+        self._tracer: Any = None
+        endpoint = endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        if not endpoint or not _HAS_OTEL:
+            return
+        try:
+            provider = TracerProvider()
+            exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+            self._tracer = provider.get_tracer("forge.observability")
+            self._enabled = True
+            logger.info("OTLP exporter enabled → %s", endpoint)
+        except Exception:
+            logger.warning("Failed to initialise OTLP exporter", exc_info=True)
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def export_event(self, event: Event) -> None:
+        """Map a Forge event to an OpenTelemetry span and export it."""
+        if not self._enabled or self._tracer is None:
+            return
+        try:
+            with self._tracer.start_as_current_span(
+                name=event.event_type.value,
+                attributes={
+                    "forge.agent": event.agent_name,
+                    "forge.trace_id": event.trace_id,
+                    "forge.span_id": event.span_id,
+                    "forge.level": event.level,
+                    "forge.tokens": event.tokens,
+                    "forge.cost_usd": event.cost_usd,
+                    "forge.duration_ms": event.duration_ms,
+                },
+            ):
+                pass  # span auto-ended by context manager
+        except Exception:
+            logger.debug("OTLP export failed for event %s", event.span_id, exc_info=True)
+
+
+def get_metrics_summary(
+    event_log: "EventLog",
+    persistent_store: PersistentEventStore | None = None,
+) -> dict[str, Any]:
+    """Build an aggregate metrics summary suitable for dashboards / API.
+
+    Combines in-memory hot data from *event_log* with optional historical
+    data from *persistent_store*.
+    """
+    summary = event_log.get_summary()
+
+    agent_activity: dict[str, int] = {}
+    for e in event_log._events:
+        if e.agent_name:
+            agent_activity[e.agent_name] = agent_activity.get(e.agent_name, 0) + 1
+
+    summary["agent_activity"] = agent_activity
+
+    if persistent_store is not None:
+        summary["persisted_event_counts"] = persistent_store.count_by_type()
+        summary["persisted_total_cost_usd"] = round(persistent_store.total_cost(), 6)
+
+    return summary
+
+
 class EventLog:
     """
     Append-only structured event log.
     
     Stores all observable events with filtering, export, and analysis capabilities.
     This is the core observability primitive — everything flows through here.
+
+    Optionally backs events to SQLite (``persistent_store``) and/or exports
+    them via OTLP (``otlp_exporter``).  Both are disabled by default so that
+    existing call-sites remain zero-config.
     """
 
-    def __init__(self, cost_tracker: CostTracker | None = None, max_events: int = 10_000, max_age_hours: float = 24.0) -> None:
+    def __init__(
+        self,
+        cost_tracker: CostTracker | None = None,
+        max_events: int = 10_000,
+        max_age_hours: float = 24.0,
+        persistent_store: PersistentEventStore | None = None,
+        otlp_exporter: OTLPExporter | None = None,
+    ) -> None:
         self._events: list[Event] = []
         self._max_events = max_events
         self.max_age_hours = max_age_hours
         self.cost_tracker = cost_tracker or CostTracker()
+        self.persistent_store = persistent_store
+        self.otlp_exporter = otlp_exporter
 
     def __repr__(self) -> str:
         return f"EventLog(events={len(self._events)}, cost=${self.cost_tracker.total_cost_usd:.4f})"
@@ -201,6 +447,15 @@ class EventLog:
             logger.warning(log_msg)
         else:
             logger.debug(log_msg)
+        # Persist to SQLite if configured
+        if self.persistent_store is not None:
+            try:
+                self.persistent_store.persist(event)
+            except Exception:
+                logger.debug("Failed to persist event", exc_info=True)
+        # Export via OTLP if configured
+        if self.otlp_exporter is not None:
+            self.otlp_exporter.export_event(event)
 
     def cleanup_old_events(self) -> int:
         """Remove events older than max_age_hours. Returns count of removed events."""
@@ -325,6 +580,24 @@ class EventLog:
         if level:
             results = [e for e in results if e.level == level]
         return results
+
+    def query_events(self, **filters: Any) -> list[dict[str, Any]]:
+        """Query persisted (historical) events.
+
+        Delegates to the ``PersistentEventStore`` if one is attached.
+        Accepts the same keyword arguments as
+        ``PersistentEventStore.query_events``.
+        """
+        if self.persistent_store is None:
+            return [e.to_dict() for e in self.filter(
+                trace_id=filters.get("trace_id"),
+                agent_name=filters.get("agent_name"),
+                event_type=(
+                    EventType(filters["event_type"]) if filters.get("event_type") else None
+                ),
+                level=filters.get("level"),
+            )]
+        return self.persistent_store.query_events(**filters)
 
     def get_trace(self, trace_id: str) -> list[Event]:
         """Get all events for a specific trace (one user request end-to-end)."""

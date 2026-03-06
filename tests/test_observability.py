@@ -1,8 +1,13 @@
 """Tests for forge.runtime.observability"""
 
 import json
+import os
+import tempfile
 import pytest
-from forge.runtime.observability import EventLog, Event, EventType, TraceContext, CostTracker
+from forge.runtime.observability import (
+    EventLog, Event, EventType, TraceContext, CostTracker,
+    PersistentEventStore, OTLPExporter, get_metrics_summary,
+)
 
 
 class TestEventLog:
@@ -83,3 +88,106 @@ class TestCostTracker:
         summary = tracker.get_summary()
         assert "A" in summary["per_agent"]
         assert "B" in summary["per_agent"]
+
+
+class TestPersistentEventStore:
+    @pytest.fixture
+    def store(self, tmp_path):
+        s = PersistentEventStore(db_path=tmp_path / "test_events.db")
+        yield s
+        s.close()
+
+    def test_persist_and_query(self, store):
+        event = Event(event_type=EventType.AGENT_START, agent_name="A", trace_id="t1")
+        store.persist(event)
+        rows = store.query_events(trace_id="t1")
+        assert len(rows) == 1
+        assert rows[0]["agent"] == "A"
+        assert rows[0]["event_type"] == "agent_start"
+
+    def test_query_by_agent(self, store):
+        store.persist(Event(event_type=EventType.AGENT_START, agent_name="A"))
+        store.persist(Event(event_type=EventType.AGENT_START, agent_name="B"))
+        rows = store.query_events(agent_name="A")
+        assert len(rows) == 1
+
+    def test_query_by_type(self, store):
+        store.persist(Event(event_type=EventType.AGENT_START, agent_name="A"))
+        store.persist(Event(event_type=EventType.LLM_CALL, agent_name="A"))
+        rows = store.query_events(event_type="llm_call")
+        assert len(rows) == 1
+
+    def test_count_by_type(self, store):
+        store.persist(Event(event_type=EventType.AGENT_START))
+        store.persist(Event(event_type=EventType.AGENT_START))
+        store.persist(Event(event_type=EventType.LLM_CALL))
+        counts = store.count_by_type()
+        assert counts["agent_start"] == 2
+        assert counts["llm_call"] == 1
+
+    def test_total_cost(self, store):
+        e = Event(event_type=EventType.LLM_RESPONSE, cost_usd=0.05)
+        store.persist(e)
+        assert store.total_cost() == pytest.approx(0.05)
+
+    def test_query_limit(self, store):
+        for i in range(10):
+            store.persist(Event(event_type=EventType.AGENT_START, agent_name=f"A{i}"))
+        rows = store.query_events(limit=3)
+        assert len(rows) == 3
+
+
+class TestEventLogWithPersistence:
+    def test_emit_persists(self, tmp_path):
+        store = PersistentEventStore(db_path=tmp_path / "test.db")
+        log = EventLog(persistent_store=store)
+        log.emit(Event(event_type=EventType.AGENT_START, agent_name="X", trace_id="t1"))
+        rows = store.query_events(trace_id="t1")
+        assert len(rows) == 1
+        store.close()
+
+    def test_query_events_delegates(self, tmp_path):
+        store = PersistentEventStore(db_path=tmp_path / "test.db")
+        log = EventLog(persistent_store=store)
+        log.emit(Event(event_type=EventType.AGENT_START, agent_name="X"))
+        result = log.query_events(agent_name="X")
+        assert len(result) == 1
+        store.close()
+
+    def test_query_events_no_store_falls_back(self):
+        log = EventLog()
+        log.emit(Event(event_type=EventType.AGENT_START, agent_name="X", trace_id="t1"))
+        result = log.query_events(trace_id="t1")
+        assert len(result) == 1
+
+
+class TestOTLPExporter:
+    def test_disabled_without_env(self):
+        exporter = OTLPExporter()
+        assert not exporter.enabled
+
+    def test_export_noop_when_disabled(self):
+        exporter = OTLPExporter()
+        event = Event(event_type=EventType.AGENT_START)
+        exporter.export_event(event)  # should not raise
+
+
+class TestGetMetricsSummary:
+    def test_metrics_summary_basic(self):
+        log = EventLog()
+        log.emit(Event(event_type=EventType.AGENT_START, agent_name="A"))
+        log.emit(Event(event_type=EventType.LLM_CALL, agent_name="A"))
+        log.emit(Event(event_type=EventType.AGENT_START, agent_name="B"))
+        summary = get_metrics_summary(log)
+        assert summary["total_events"] == 3
+        assert summary["agent_activity"]["A"] == 2
+        assert summary["agent_activity"]["B"] == 1
+
+    def test_metrics_summary_with_store(self, tmp_path):
+        store = PersistentEventStore(db_path=tmp_path / "m.db")
+        log = EventLog(persistent_store=store)
+        log.emit(Event(event_type=EventType.AGENT_START, agent_name="X"))
+        summary = get_metrics_summary(log, persistent_store=store)
+        assert "persisted_event_counts" in summary
+        assert summary["persisted_event_counts"]["agent_start"] == 1
+        store.close()
