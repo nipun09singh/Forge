@@ -30,7 +30,7 @@ from forge.runtime.guardrails import GuardrailsEngine
 from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS, Event, EventType
 from forge.runtime.phase_gates import PhaseGateEnforcer
 from forge.runtime.structured_outputs import parse_completion_signal
-from forge.runtime.token_manager import TokenCounter
+from forge.runtime.token_manager import TokenCounter, SemanticBudget
 from forge.runtime.confidence import ConfidenceScorer
 
 logger = logging.getLogger(__name__)
@@ -299,6 +299,11 @@ class OrchestratorAgent:
             {"role": "user", "content": f"Build this project: {task}. Create all necessary files using your tools."},
         ]
 
+        # Semantic context budget manager
+        semantic_budget = SemanticBudget(model=self.model)
+        semantic_budget.tag_message(conversation[0], "system")
+        semantic_budget.tag_message(conversation[1], "conversation")
+
         tools_schema = self._get_tools_schema()
         iterations = 0
         project_complete = False
@@ -378,6 +383,7 @@ class OrchestratorAgent:
                             for tc in choice.message.tool_calls
                         ],
                     })
+                    semantic_budget.tag_message(conversation[-1], "conversation")
 
                     # Execute each tool call
                     for tc in choice.message.tool_calls:
@@ -397,6 +403,7 @@ class OrchestratorAgent:
                                 "content": f"⛔ Phase gate: {phase_reason}",
                                 "tool_call_id": tc.id,
                             })
+                            semantic_budget.tag_message(conversation[-1], "tool_results")
                             continue
 
                         # Guardrails check
@@ -409,6 +416,7 @@ class OrchestratorAgent:
                                     "content": f"Blocked by guardrails: {blocked[0].description}",
                                     "tool_call_id": tc.id,
                                 })
+                                semantic_budget.tag_message(conversation[-1], "tool_results")
                                 continue
 
                         if tool:
@@ -478,6 +486,15 @@ class OrchestratorAgent:
                                     "content": str(output)[:5000],
                                     "tool_call_id": tc.id,
                                 })
+                                # Semantic tagging for tool results
+                                if fn_name in ("web_search", "browse_web"):
+                                    semantic_budget.tag_message(conversation[-1], "research")
+                                elif fn_name == "read_write_file" and args.get("action") == "write" and any(
+                                    kw in str(args.get("path", "")).lower() for kw in ("spec", "plan", "design", "architecture")
+                                ):
+                                    semantic_budget.tag_message(conversation[-1], "spec")
+                                else:
+                                    semantic_budget.tag_message(conversation[-1], "tool_results")
                             except Exception as e:
                                 logger.warning(f"  ❌ {fn_name} error: {e}")
                                 if self._event_log:
@@ -491,12 +508,14 @@ class OrchestratorAgent:
                                     "content": f"Error: {e}",
                                     "tool_call_id": tc.id,
                                 })
+                                semantic_budget.tag_message(conversation[-1], "tool_results")
                         else:
                             conversation.append({
                                 "role": "tool",
                                 "content": f"Unknown tool: {fn_name}",
                                 "tool_call_id": tc.id,
                             })
+                            semantic_budget.tag_message(conversation[-1], "tool_results")
 
                     continue  # Loop back for more thinking
 
@@ -511,6 +530,7 @@ class OrchestratorAgent:
                         logger.debug(f"  🛡️ Output filtered: {[v.rule for v in output_violations]}")
                 
                 conversation.append({"role": "assistant", "content": text_output})
+                semantic_budget.tag_message(conversation[-1], "conversation")
 
                 # Check for completion signal (structured JSON or string patterns)
                 completion = parse_completion_signal(text_output)
@@ -520,6 +540,7 @@ class OrchestratorAgent:
                     if not can_complete:
                         feedback = phase_enforcer.get_blocker_feedback()
                         conversation.append({"role": "user", "content": feedback})
+                        semantic_budget.tag_message(conversation[-1], "conversation")
                         logger.info(f"  ⛔ Completion blocked: {len(blockers)} unmet requirements")
                         continue
                     project_complete = True
@@ -537,6 +558,7 @@ class OrchestratorAgent:
                         phase_instruction
                     ),
                 })
+                semantic_budget.tag_message(conversation[-1], "conversation")
 
             except Exception as e:
                 logger.error(f"  Iteration {iterations} error: {e}")
@@ -544,57 +566,13 @@ class OrchestratorAgent:
                     "role": "user",
                     "content": f"An error occurred: {e}. Please continue building the project.",
                 })
+                semantic_budget.tag_message(conversation[-1], "conversation")
 
             if _iter_span and self._trace_ctx:
                 self._trace_ctx.end_span()
 
-            # Smart context management — token-aware pruning
-            if self._token_counter.needs_pruning(conversation):
-                # Generate state summary every 20 iterations
-                pinned = None
-                if iterations % 20 == 0 and iterations > 0:
-                    try:
-                        if self._event_log:
-                            self._event_log.emit_llm_call(
-                                agent_name="orchestrator",
-                                model=self.model,
-                                messages_count=2,
-                                tools_count=0,
-                                trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                            )
-                        _summary_start = time.time()
-                        summary_resp = await self._llm_client.chat.completions.create(
-                            model=self.model,
-                            messages=[
-                                {"role": "system", "content": "Summarize the current project state in 200 words: what files exist, what architecture was chosen, what's done, what's remaining."},
-                                {"role": "user", "content": f"Files created so far: {files_created}\nLast few messages: {json.dumps([m.get('content', '')[:200] for m in conversation[-10:]], default=str)}"},
-                            ],
-                            temperature=0.2,
-                        )
-                        _summary_duration = (time.time() - _summary_start) * 1000
-                        state_summary = summary_resp.choices[0].message.content or ""
-                        if hasattr(summary_resp, 'usage') and summary_resp.usage:
-                            if self._event_log:
-                                self._event_log.emit_llm_response(
-                                    agent_name="orchestrator",
-                                    model=self.model,
-                                    prompt_tokens=getattr(summary_resp.usage, 'prompt_tokens', 0) or 0,
-                                    completion_tokens=getattr(summary_resp.usage, 'completion_tokens', 0) or 0,
-                                    has_tool_calls=False,
-                                    duration_ms=_summary_duration,
-                                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                                )
-                            s_prompt = getattr(summary_resp.usage, 'prompt_tokens', 0) or 0
-                            s_completion = getattr(summary_resp.usage, 'completion_tokens', 0) or 0
-                            total_tokens += s_prompt + s_completion
-                            s_costs = MODEL_COSTS.get(self.model, MODEL_COSTS.get("gpt-4", {"input": 0.03, "output": 0.06}))
-                            total_cost += (s_prompt / 1000 * s_costs["input"]) + (s_completion / 1000 * s_costs["output"])
-                        pinned = {"role": "user", "content": f"[PROJECT STATE - iteration {iterations}]: {state_summary}"}
-                    except Exception as e:
-                        logger.debug(f"State summary generation failed: {e}")
-                        pinned = {"role": "user", "content": f"[PROJECT STATE]: Files created: {', '.join(files_created[-20:])}"}
-                
-                conversation = self._token_counter.prune_conversation(conversation, pinned_message=pinned)
+            # Smart context management — semantic budget pruning
+            conversation = semantic_budget.prune_by_budget(conversation)
 
         # OBSERVE: Scan for created files
         for f in project_dir.rglob("*"):

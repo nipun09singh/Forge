@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -191,3 +192,111 @@ class TokenCounter:
             f"({len(conversation)} -> {len(result)} messages)"
         )
         return result
+
+
+@dataclass
+class ContextCategory:
+    """A semantic category for context budget management."""
+    name: str              # "system", "research", "spec", "active_file", "tool_results", "conversation"
+    budget_tokens: int     # max tokens for this category
+    pinned: bool           # if True, NEVER prune this content
+    priority: int          # lower number = higher priority (pruned LAST)
+
+
+class SemanticBudget:
+    """Category-based token budget manager. Pins important context, prunes verbose context."""
+
+    DEFAULT_CATEGORIES = {
+        "system":       ContextCategory("system",       2000,  pinned=True,  priority=0),
+        "research":     ContextCategory("research",     4000,  pinned=True,  priority=1),
+        "spec":         ContextCategory("spec",         3000,  pinned=True,  priority=2),
+        "active_file":  ContextCategory("active_file",  4000,  pinned=False, priority=3),
+        "conversation": ContextCategory("conversation", 40000, pinned=False, priority=4),
+        "tool_results": ContextCategory("tool_results", 5000,  pinned=False, priority=5),
+    }
+
+    def __init__(self, model: str = "gpt-4o", categories: dict | None = None):
+        self.categories = categories or {k: ContextCategory(v.name, v.budget_tokens, v.pinned, v.priority) for k, v in self.DEFAULT_CATEGORIES.items()}
+        self._tagged_messages: list[tuple[dict, str]] = []  # (message, category_name)
+        self._counter = TokenCounter(model=model)
+
+    def tag_message(self, message: dict, category: str) -> None:
+        """Tag a message with its semantic category."""
+        if category not in self.categories:
+            category = "conversation"  # fallback
+        self._tagged_messages.append((message, category))
+
+    def get_budget_status(self) -> dict[str, dict]:
+        """Return per-category token usage vs budget."""
+        usage = {}
+        for cat_name, cat in self.categories.items():
+            cat_messages = [m for m, c in self._tagged_messages if c == cat_name]
+            tokens = sum(self._counter.count_message_tokens([m]) for m in cat_messages)
+            usage[cat_name] = {"used": tokens, "budget": cat.budget_tokens, "pinned": cat.pinned, "priority": cat.priority}
+        return usage
+
+    def prune_by_budget(self, conversation: list[dict]) -> list[dict]:
+        """Prune conversation respecting categories and pinning."""
+        total_budget = self._counter.available_tokens
+        total_tokens = self._counter.count_message_tokens(conversation)
+
+        if total_tokens <= total_budget:
+            return conversation  # No pruning needed
+
+        # Build category→messages index
+        categorized: dict[str, list[int]] = {c: [] for c in self.categories}
+        for i, msg in enumerate(conversation):
+            cat = self._get_category(i, msg)
+            categorized.setdefault(cat, []).append(i)
+
+        # Sort categories by priority (highest number = prune first)
+        prune_order = sorted(self.categories.values(), key=lambda c: c.priority, reverse=True)
+
+        indices_to_remove: set[int] = set()
+
+        for cat in prune_order:
+            if cat.pinned:
+                continue  # NEVER prune pinned categories
+
+            if total_tokens <= total_budget:
+                break
+
+            # Prune oldest messages in this category first
+            cat_indices = categorized.get(cat.name, [])
+            for idx in cat_indices:
+                if idx in indices_to_remove:
+                    continue
+                msg = conversation[idx]
+                tokens_saved = self._counter.count_message_tokens([msg])
+
+                # Don't orphan tool messages
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    # Also remove all subsequent tool responses
+                    j = idx + 1
+                    while j < len(conversation) and conversation[j].get("role") == "tool":
+                        tokens_saved += self._counter.count_message_tokens([conversation[j]])
+                        indices_to_remove.add(j)
+                        j += 1
+                elif msg.get("role") == "tool":
+                    # Don't remove a tool response without its assistant — skip, handle via the assistant
+                    continue
+
+                indices_to_remove.add(idx)
+                total_tokens -= tokens_saved
+
+                if total_tokens <= total_budget:
+                    break
+
+        return [msg for i, msg in enumerate(conversation) if i not in indices_to_remove]
+
+    def _get_category(self, index: int, msg: dict) -> str:
+        """Determine category from message content/role."""
+        if index < len(self._tagged_messages):
+            return self._tagged_messages[index][1]
+
+        role = msg.get("role", "")
+        if role == "system":
+            return "system"
+        if role == "tool":
+            return "tool_results"
+        return "conversation"
