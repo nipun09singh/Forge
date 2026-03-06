@@ -47,6 +47,83 @@ class TestSharedMemory:
         assert mem.recall("k1") is None
 
 
+class TestSearchPersistence:
+    """search() should query the persistent backend, not just _store."""
+
+    def test_search_finds_backend_entries_after_store_cleared(self, tmp_dir):
+        db_path = os.path.join(tmp_dir, "search_persist.db")
+        mem = SharedMemory.persistent(db_path)
+        mem.store("k1", "v1", author="alice", tags=["important"])
+        mem.store("k2", "v2", author="bob", tags=["trivial"])
+
+        # Clear the in-memory cache — backend still has data
+        mem._store.clear()
+        assert mem._store == {}
+
+        results = mem.search()
+        assert len(results) == 2
+
+    def test_search_by_tag_from_backend(self, tmp_dir):
+        db_path = os.path.join(tmp_dir, "search_tag.db")
+        mem = SharedMemory.persistent(db_path)
+        mem.store("k1", "v1", tags=["important"])
+        mem.store("k2", "v2", tags=["trivial"])
+
+        mem._store.clear()
+        results = mem.search(tag="important")
+        assert len(results) == 1
+        assert results[0].key == "k1"
+
+    def test_search_by_author_from_backend(self, tmp_dir):
+        db_path = os.path.join(tmp_dir, "search_author.db")
+        mem = SharedMemory.persistent(db_path)
+        mem.store("k1", "v1", author="alice")
+        mem.store("k2", "v2", author="bob")
+
+        mem._store.clear()
+        results = mem.search(author="alice")
+        assert len(results) == 1
+        assert results[0].key == "k1"
+
+    def test_no_duplicates_when_in_both_stores(self, tmp_dir):
+        db_path = os.path.join(tmp_dir, "search_dedup.db")
+        mem = SharedMemory.persistent(db_path)
+        mem.store("k1", "v1", author="alice", tags=["important"])
+        mem.store("k2", "v2", author="bob", tags=["trivial"])
+
+        # _store and backend both have the entries — no duplicates expected
+        results = mem.search()
+        keys = [r.key for r in results]
+        assert sorted(keys) == ["k1", "k2"]
+
+    def test_search_merges_store_and_backend(self, tmp_dir):
+        db_path = os.path.join(tmp_dir, "search_merge.db")
+        mem = SharedMemory.persistent(db_path)
+        mem.store("k1", "v1", author="alice", tags=["t"])
+
+        # Add an entry only in _store (bypass backend)
+        mem._store["k2"] = MemoryEntry(key="k2", value="v2", author="alice", tags=["t"])
+
+        # Add an entry only in backend (bypass _store)
+        mem._backend.store("k3", "v3", author="alice", tags=["t"])
+
+        results = mem.search(author="alice", tag="t")
+        keys = sorted(r.key for r in results)
+        assert keys == ["k1", "k2", "k3"]
+
+    def test_search_survives_new_instance(self, tmp_dir):
+        """After restart (new SharedMemory, same db), search still works."""
+        db_path = os.path.join(tmp_dir, "search_restart.db")
+        mem1 = SharedMemory.persistent(db_path)
+        mem1.store("k1", "v1", author="alice", tags=["important"])
+
+        # Simulate restart
+        mem2 = SharedMemory.persistent(db_path)
+        results = mem2.search(tag="important")
+        assert len(results) == 1
+        assert results[0].key == "k1"
+
+
 class TestPersistentMemory:
     def test_sqlite_store_recall(self, tmp_dir):
         db_path = os.path.join(tmp_dir, "test.db")
