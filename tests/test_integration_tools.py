@@ -29,10 +29,23 @@ class TestTwilioTool:
         assert len(tool.parameters) >= 2
 
     @pytest.mark.asyncio
-    async def test_mock_mode_no_env(self, monkeypatch):
-        """Without TWILIO_ACCOUNT_SID, returns mock response."""
+    async def test_error_without_mock_mode(self, monkeypatch):
+        """Without credentials and without MOCK_MODE, returns an error."""
         monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
         monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MOCK_MODE", raising=False)
+        monkeypatch.delenv("MOCK_INTEGRATIONS", raising=False)
+        tool = create_twilio_tool()
+        result = json.loads(await tool.run(to="+15551234567", body="Hello from Forge"))
+        assert result["success"] is False
+        assert "MOCK_MODE" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_mock_mode_no_env(self, monkeypatch):
+        """Without TWILIO_ACCOUNT_SID but with MOCK_MODE=true, returns mock response."""
+        monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+        monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_twilio_tool()
         result = json.loads(await tool.run(to="+15551234567", body="Hello from Forge"))
         assert result["success"] is True
@@ -41,10 +54,23 @@ class TestTwilioTool:
         assert "sid" in result
 
     @pytest.mark.asyncio
+    async def test_mock_mode_via_mock_integrations(self, monkeypatch):
+        """MOCK_INTEGRATIONS=true also enables mock mode."""
+        monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
+        monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MOCK_MODE", raising=False)
+        monkeypatch.setenv("MOCK_INTEGRATIONS", "true")
+        tool = create_twilio_tool()
+        result = json.loads(await tool.run(to="+15551234567", body="Hello"))
+        assert result["success"] is True
+        assert result["mock"] is True
+
+    @pytest.mark.asyncio
     async def test_mock_mode_different_numbers(self, monkeypatch):
         """Different phone numbers produce different mock SIDs."""
         monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
         monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_twilio_tool()
         r1 = json.loads(await tool.run(to="+15551111111", body="msg1"))
         r2 = json.loads(await tool.run(to="+15552222222", body="msg2"))
@@ -54,6 +80,7 @@ class TestTwilioTool:
     async def test_mock_body_preserved(self, monkeypatch):
         monkeypatch.delenv("TWILIO_ACCOUNT_SID", raising=False)
         monkeypatch.delenv("TWILIO_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_twilio_tool()
         result = json.loads(await tool.run(to="+1555", body="Important message content"))
         assert result["body"] == "Important message content"
@@ -69,8 +96,20 @@ class TestStripeTool:
         assert "payment_method_id" in param_names
 
     @pytest.mark.asyncio
+    async def test_error_without_mock_mode(self, monkeypatch):
+        """Without credentials and without MOCK_MODE, returns an error."""
+        monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.delenv("MOCK_MODE", raising=False)
+        monkeypatch.delenv("MOCK_INTEGRATIONS", raising=False)
+        tool = create_stripe_tool()
+        result = json.loads(await tool.run(action="charge", amount=5000))
+        assert result["success"] is False
+        assert "MOCK_MODE" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_mock_charge(self, monkeypatch):
         monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_stripe_tool()
         result = json.loads(await tool.run(action="charge", amount=5000, currency="usd"))
         assert result["success"] is True
@@ -81,6 +120,7 @@ class TestStripeTool:
     @pytest.mark.asyncio
     async def test_mock_create_customer(self, monkeypatch):
         monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_stripe_tool()
         result = json.loads(await tool.run(action="create_customer", customer_email="test@example.com"))
         assert result["success"] is True
@@ -89,6 +129,7 @@ class TestStripeTool:
     @pytest.mark.asyncio
     async def test_mock_list_charges(self, monkeypatch):
         monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_stripe_tool()
         result = json.loads(await tool.run(action="list_charges"))
         assert result["success"] is True
@@ -97,14 +138,27 @@ class TestStripeTool:
     @pytest.mark.asyncio
     async def test_mock_subscribe(self, monkeypatch):
         monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_stripe_tool()
         result = json.loads(await tool.run(action="subscribe", plan_id="price_123", customer_id="cus_abc"))
         assert result["success"] is True
         assert result["status"] == "active"
 
     @pytest.mark.asyncio
+    async def test_mock_mode_via_mock_integrations(self, monkeypatch):
+        """MOCK_INTEGRATIONS=true also enables mock mode."""
+        monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.delenv("MOCK_MODE", raising=False)
+        monkeypatch.setenv("MOCK_INTEGRATIONS", "true")
+        tool = create_stripe_tool()
+        result = json.loads(await tool.run(action="charge", amount=1000))
+        assert result["success"] is True
+        assert result["mock"] is True
+
+    @pytest.mark.asyncio
     async def test_unknown_action(self, monkeypatch):
         monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_stripe_tool()
         result = json.loads(await tool.run(action="refund_everything"))
         assert result["success"] is False
@@ -119,8 +173,20 @@ class TestCalendarTool:
         assert tool.name == "calendar"
 
     @pytest.mark.asyncio
+    async def test_error_without_mock_mode(self, monkeypatch):
+        """Without credentials and without MOCK_MODE, returns an error."""
+        monkeypatch.delenv("GOOGLE_CALENDAR_API_KEY", raising=False)
+        monkeypatch.delenv("MOCK_MODE", raising=False)
+        monkeypatch.delenv("MOCK_INTEGRATIONS", raising=False)
+        tool = create_calendar_tool()
+        result = json.loads(await tool.run(action="list_events"))
+        assert result["success"] is False
+        assert "MOCK_MODE" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_mock_create_event(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_CALENDAR_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_calendar_tool()
         result = json.loads(await tool.run(
             action="create_event", title="Team Standup",
@@ -133,6 +199,7 @@ class TestCalendarTool:
     @pytest.mark.asyncio
     async def test_mock_list_events(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_CALENDAR_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_calendar_tool()
         result = json.loads(await tool.run(action="list_events"))
         assert result["success"] is True
@@ -141,6 +208,7 @@ class TestCalendarTool:
     @pytest.mark.asyncio
     async def test_mock_check_availability(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_CALENDAR_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_calendar_tool()
         result = json.loads(await tool.run(action="check_availability", date="2025-01-15"))
         assert result["success"] is True
@@ -150,6 +218,7 @@ class TestCalendarTool:
     @pytest.mark.asyncio
     async def test_mock_delete_nonexistent(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_CALENDAR_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_calendar_tool()
         result = json.loads(await tool.run(action="delete_event", event_id="nonexistent"))
         assert result["success"] is False
@@ -157,6 +226,7 @@ class TestCalendarTool:
     @pytest.mark.asyncio
     async def test_unknown_action(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_CALENDAR_API_KEY", raising=False)
+        monkeypatch.setenv("MOCK_MODE", "true")
         tool = create_calendar_tool()
         result = json.loads(await tool.run(action="teleport"))
         assert result["success"] is False

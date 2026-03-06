@@ -2,7 +2,8 @@
 
 Configure via environment variables:
     GOOGLE_CALENDAR_API_KEY or GOOGLE_SERVICE_ACCOUNT_JSON
-If not set, runs in mock mode.
+If not set, mock mode requires explicit opt-in via MOCK_MODE=true or
+MOCK_INTEGRATIONS=true.
 """
 
 from __future__ import annotations
@@ -22,6 +23,12 @@ logger = logging.getLogger(__name__)
 _mock_events: list[dict] = []
 
 
+def _is_mock_mode_enabled() -> bool:
+    """Check if mock mode is explicitly enabled via environment variables."""
+    return (os.environ.get("MOCK_MODE", "").lower() == "true"
+            or os.environ.get("MOCK_INTEGRATIONS", "").lower() == "true")
+
+
 async def _calendar_action(action: str, title: str = "", date: str = "",
                            time: str = "", duration_minutes: int = 60,
                            attendees: str = "", event_id: str = "",
@@ -30,7 +37,14 @@ async def _calendar_action(action: str, title: str = "", date: str = "",
     api_key = os.environ.get("GOOGLE_CALENDAR_API_KEY", "")
 
     if not api_key:
-        # Mock mode
+        if not _is_mock_mode_enabled():
+            return json.dumps({
+                "success": False,
+                "error": "GOOGLE_CALENDAR_API_KEY not configured. Set MOCK_MODE=true for testing without real credentials.",
+            })
+
+        # Explicit mock mode
+        logger.warning("⚠️ MOCK MODE: Calendar integration running without real credentials")
         if action == "create_event":
             event = {
                 "id": f"evt_{uuid.uuid4().hex[:8]}",
@@ -45,7 +59,7 @@ async def _calendar_action(action: str, title: str = "", date: str = "",
             _mock_events.append(event)
             return json.dumps({
                 "success": True, "mock": True, "event": event,
-                "message": "Event created (mock — set GOOGLE_CALENDAR_API_KEY for real calendar)",
+                "message": "⚠️ MOCK MODE — Event created (not real — set GOOGLE_CALENDAR_API_KEY for real calendar)",
             })
 
         elif action == "list_events":
@@ -86,7 +100,7 @@ def create_calendar_tool() -> Tool:
     """Create the Google Calendar tool."""
     return Tool(
         name="calendar",
-        description="Manage calendar events. Supports: create_event, list_events, delete_event, check_availability. Uses mock mode if GOOGLE_CALENDAR_API_KEY is not set.",
+        description="Manage calendar events. Supports: create_event, list_events, delete_event, check_availability. Requires GOOGLE_CALENDAR_API_KEY or explicit MOCK_MODE=true.",
         parameters=[
             ToolParameter(name="action", type="string", description="Action: create_event, list_events, delete_event, check_availability", required=True),
             ToolParameter(name="title", type="string", description="Event title (for create_event)", required=False),

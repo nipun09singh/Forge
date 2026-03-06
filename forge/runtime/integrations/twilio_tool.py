@@ -3,7 +3,8 @@
 Supports real Twilio API or mock mode for development/testing.
 Configure via environment variables:
     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
-If not set, runs in mock mode (returns simulated responses).
+If not set, mock mode requires explicit opt-in via MOCK_MODE=true or
+MOCK_INTEGRATIONS=true.
 """
 
 from __future__ import annotations
@@ -21,15 +22,32 @@ from forge.runtime.tools import Tool, ToolParameter
 logger = logging.getLogger(__name__)
 
 
+def _is_mock_mode_enabled() -> bool:
+    """Check if mock mode is explicitly enabled via environment variables."""
+    return (os.environ.get("MOCK_MODE", "").lower() == "true"
+            or os.environ.get("MOCK_INTEGRATIONS", "").lower() == "true")
+
+
 async def _send_sms(to: str, body: str, from_number: str = "") -> str:
     """Send an SMS via Twilio API or mock."""
+    from forge.runtime.integrations.rate_limiter import get_sms_limiter, rate_limit_error
+    limiter = get_sms_limiter()
+    if not limiter.acquire("sms"):
+        return rate_limit_error("send_sms", limiter, "sms")
+
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
     from_num = from_number or os.environ.get("TWILIO_FROM_NUMBER", "+15005550006")
 
     if not account_sid or not auth_token:
-        # Mock mode
-        logger.info(f"[MOCK] SMS to {to}: {body[:50]}...")
+        if not _is_mock_mode_enabled():
+            return json.dumps({
+                "success": False,
+                "error": "TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not configured. Set MOCK_MODE=true for testing without real credentials.",
+            })
+
+        # Explicit mock mode
+        logger.warning("⚠️ MOCK MODE: Twilio SMS integration running without real credentials")
         return json.dumps({
             "success": True,
             "mock": True,
@@ -38,7 +56,7 @@ async def _send_sms(to: str, body: str, from_number: str = "") -> str:
             "from": from_num,
             "body": body,
             "status": "sent",
-            "message": "SMS sent (mock mode — set TWILIO_ACCOUNT_SID for real delivery)",
+            "message": "⚠️ MOCK MODE — SMS sent (not real — set TWILIO_ACCOUNT_SID for real delivery)",
         })
 
     # Real Twilio API
@@ -71,7 +89,7 @@ def create_twilio_tool() -> Tool:
     """Create the Twilio SMS tool."""
     return Tool(
         name="send_sms",
-        description="Send an SMS text message via Twilio. Uses mock mode if TWILIO_ACCOUNT_SID is not set.",
+        description="Send an SMS text message via Twilio. Requires TWILIO_ACCOUNT_SID or explicit MOCK_MODE=true.",
         parameters=[
             ToolParameter(name="to", type="string", description="Recipient phone number (e.g., +14155551234)", required=True),
             ToolParameter(name="body", type="string", description="Message text to send", required=True),
