@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from forge.runtime.primitives import (
 )
 from forge.runtime.primitives.critics import CriticVerdict
 from forge.runtime.knowledge import DomainKnowledge
+
+logger = logging.getLogger(__name__)
 
 
 class AgentStatus(str, Enum):
@@ -81,6 +84,8 @@ class Agent:
         critic: CriticBase | None = None,
         escalation_policy: EscalationPolicy | None = None,
         domain_knowledge: DomainKnowledge | None = None,
+        tool_timeout_seconds: float = 30.0,
+        max_concurrent_tools: int = 5,
     ):
         self.id = f"agent-{uuid.uuid4().hex[:8]}"
         self.name = name
@@ -109,6 +114,8 @@ class Agent:
         self._approval_gate: HumanApprovalGate | None = None
         self._guardrails: GuardrailsEngine | None = None
         self._model_router: ModelRouter | None = None
+        self._tool_timeout_seconds = tool_timeout_seconds
+        self._max_concurrent_tools = max_concurrent_tools
 
         # Composable primitives
         self._planner = planner or SimplePlanner()
@@ -292,6 +299,15 @@ class Agent:
 
             # Max iterations reached
             self.status = AgentStatus.ERROR
+            if self._performance_tracker:
+                self._performance_tracker.record(TaskMetric(
+                    agent_name=self.name,
+                    task_preview=task[:100],
+                    success=False,
+                    quality_score=0.0,
+                    duration_seconds=time.time() - _start_time,
+                    iterations_used=self.max_iterations,
+                ))
             return TaskResult(
                 success=False,
                 output=self.conversation[-1].get("content", "Max iterations reached."),
@@ -299,6 +315,15 @@ class Agent:
 
         except Exception as e:
             self.status = AgentStatus.ERROR
+            if self._performance_tracker:
+                self._performance_tracker.record(TaskMetric(
+                    agent_name=self.name,
+                    task_preview=task[:100],
+                    success=False,
+                    quality_score=0.0,
+                    duration_seconds=time.time() - _start_time,
+                    iterations_used=0,
+                ))
             return TaskResult(success=False, output=f"Agent error: {e}")
 
     async def _call_llm(self) -> dict[str, Any]:
@@ -366,57 +391,113 @@ class Agent:
         return result
 
     async def _execute_tools(self, tool_calls: list[dict]) -> list[dict]:
-        """Execute tool calls and return results."""
+        """Execute tool calls concurrently and return results."""
         import json
-        results = []
-        for tc in tool_calls:
-            fn_name = tc["function"]["name"]
+        semaphore = asyncio.Semaphore(self._max_concurrent_tools)
+
+        async def _run_one(tc: dict) -> dict:
+            async with semaphore:
+                return await self._execute_single_tool(tc)
+
+        results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
+        return list(results)
+
+    async def _execute_single_tool(self, tc: dict) -> dict:
+        """Execute a single tool call with guardrails, approval, and observability."""
+        import json
+        fn_name = tc["function"]["name"]
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except json.JSONDecodeError:
+            args = {}
+
+        # Guardrails check
+        if self._guardrails:
+            violations = self._guardrails.check_tool_call(fn_name, args)
+            blocked = [v for v in violations if v.severity == "block"]
+            if blocked:
+                return {"id": tc["id"], "output": f"Blocked by guardrails: {blocked[0].description}"}
+
+        tool = self.tool_registry.get(fn_name)
+        if not tool:
+            return {"id": tc["id"], "output": f"Unknown tool: {fn_name}"}
+
+        try:
+            # Human approval gate
+            if self.require_human_approval and self._approval_gate:
+                approval = await self._approval_gate.approve(ApprovalRequest(
+                    agent_name=self.name,
+                    action_description=f"Execute tool '{fn_name}' with args: {json.dumps(args, default=str)[:300]}",
+                    action_type="tool_call",
+                    urgency=Urgency.MEDIUM,
+                    context={"tool": fn_name, "args": args},
+                ))
+                if approval.decision == ApprovalDecision.REJECTED:
+                    return {"id": tc["id"], "output": f"Tool call rejected by human: {approval.feedback}"}
+                if approval.decision == ApprovalDecision.MODIFIED and approval.modified_action:
+                    try:
+                        args = json.loads(approval.modified_action) if approval.modified_action.startswith("{") else args
+                    except json.JSONDecodeError:
+                        pass
+
+            # Execute with timeout and retry
+            output = await self._run_tool_with_retry(tool, fn_name, args)
+
+            if self._event_log:
+                self._event_log.emit_tool_result(
+                    agent_name=self.name, tool_name=fn_name, success=True,
+                    output_preview=str(output)[:200], duration_ms=0.0,
+                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                )
+            return {"id": tc["id"], "output": str(output)}
+        except Exception as e:
+            if self._event_log:
+                self._event_log.emit_tool_result(
+                    agent_name=self.name, tool_name=fn_name, success=False,
+                    output_preview=str(e)[:200], duration_ms=0.0,
+                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                )
+            return {"id": tc["id"], "output": f"Tool error: {e}"}
+
+    async def _run_tool_with_retry(
+        self, tool: Tool, tool_name: str, args: dict,
+        max_retries: int = 2, base_delay: float = 1.0,
+    ) -> Any:
+        """Execute a tool with retry and exponential backoff for transient failures."""
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
             try:
-                args = json.loads(tc["function"]["arguments"])
-            except json.JSONDecodeError:
-                args = {}
+                return await asyncio.wait_for(
+                    tool.run(**args),
+                    timeout=self._tool_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"Tool '{tool_name}' timed out after {self._tool_timeout_seconds}s")
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Tool '{tool_name}' timed out, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                else:
+                    raise last_error
+            except Exception as e:
+                last_error = e
+                # Only retry on transient errors
+                if attempt < max_retries and self._is_transient_error(e):
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Tool '{tool_name}' failed with {type(e).__name__}, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        raise last_error or RuntimeError(f"Tool '{tool_name}' failed after {max_retries + 1} attempts")
 
-            # Guardrails check
-            if self._guardrails:
-                violations = self._guardrails.check_tool_call(fn_name, args)
-                blocked = [v for v in violations if v.severity == "block"]
-                if blocked:
-                    results.append({"id": tc["id"], "output": f"Blocked by guardrails: {blocked[0].description}"})
-                    continue
-
-            tool = self.tool_registry.get(fn_name)
-            if tool:
-                try:
-                    # Human approval gate — ask before executing tool
-                    if self.require_human_approval and self._approval_gate:
-                        approval = await self._approval_gate.approve(ApprovalRequest(
-                            agent_name=self.name,
-                            action_description=f"Execute tool '{fn_name}' with args: {json.dumps(args, default=str)[:300]}",
-                            action_type="tool_call",
-                            urgency=Urgency.MEDIUM,
-                            context={"tool": fn_name, "args": args},
-                        ))
-                        if approval.decision == ApprovalDecision.REJECTED:
-                            results.append({"id": tc["id"], "output": f"Tool call rejected by human: {approval.feedback}"})
-                            continue
-                        if approval.decision == ApprovalDecision.MODIFIED and approval.modified_action:
-                            try:
-                                args = json.loads(approval.modified_action) if approval.modified_action.startswith("{") else args
-                            except json.JSONDecodeError:
-                                pass  # Keep original args if modified action is invalid JSON
-                    output = await tool.run(**args)
-                    results.append({"id": tc["id"], "output": str(output)})
-                    if self._event_log:
-                        self._event_log.emit_tool_result(
-                            agent_name=self.name, tool_name=fn_name, success=True,
-                            output_preview=str(output)[:200], duration_ms=0.0,
-                            trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                        )
-                except Exception as e:
-                    results.append({"id": tc["id"], "output": f"Tool error: {e}"})
-            else:
-                results.append({"id": tc["id"], "output": f"Unknown tool: {fn_name}"})
-        return results
+    @staticmethod
+    def _is_transient_error(e: Exception) -> bool:
+        """Determine if an error is transient and worth retrying."""
+        transient_types = (TimeoutError, ConnectionError, OSError)
+        if isinstance(e, transient_types):
+            return True
+        error_str = str(e).lower()
+        return any(s in error_str for s in ("timeout", "rate limit", "429", "503", "connection reset"))
 
     async def execute_stream(self, task: str, context: dict[str, Any] | None = None):
         """

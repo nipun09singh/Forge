@@ -79,6 +79,8 @@ class Agency:
 
         self.max_concurrent_tasks: int = 0
         self._checkpoint_store: CheckpointStore | None = None
+        self._task_count: int = 0
+        self._evolution_interval: int = 10
 
         # Initialize LLM client (graceful if no API key — fails only on actual LLM calls)
         client_kwargs: dict[str, Any] = {}
@@ -138,6 +140,8 @@ class Agency:
                 # Wire performance tracking for self-improvement
                 if self._performance_tracker and hasattr(agent, 'set_performance_tracker'):
                     agent.set_performance_tracker(self._performance_tracker)
+                if self._quality_gate and hasattr(agent, 'set_quality_gate'):
+                    agent.set_quality_gate(self._quality_gate)
         except ImportError:
             pass
 
@@ -189,25 +193,32 @@ class Agency:
         # Route through planner for complex multi-step tasks
         if use_planner and self.planner:
             plan_result = await self.planner.plan_and_execute(task, context)
-            return TaskResult(
+            result = TaskResult(
                 success=plan_result["status"] == "completed",
                 output=plan_result.get("summary", "Plan execution finished."),
                 data=plan_result,
             )
-
-        if team_name and team_name in self.teams:
-            return await self.teams[team_name].execute(task, context)
-
-        # Auto-route: try first team, then standalone agents
-        if self.teams:
+        elif team_name and team_name in self.teams:
+            result = await self.teams[team_name].execute(task, context)
+        elif self.teams:
             first_team = next(iter(self.teams.values()))
-            return await first_team.execute(task, context)
-
-        if self._standalone_agents:
+            result = await first_team.execute(task, context)
+        elif self._standalone_agents:
             first_agent = next(iter(self._standalone_agents.values()))
-            return await first_agent.execute(task, context)
+            result = await first_agent.execute(task, context)
+        else:
+            return TaskResult(success=False, output="No agents or teams available.")
 
-        return TaskResult(success=False, output="No agents or teams available.")
+        # Trigger self-improvement cycle every N tasks
+        self._task_count += 1
+        if self._task_count % self._evolution_interval == 0 and self._performance_tracker:
+            try:
+                await self.self_evolution.run_evolution_cycle()
+                await self.agent_spawner.check_and_spawn(self)
+            except Exception as e:
+                logger.debug(f"Self-improvement cycle skipped: {e}")
+
+        return result
 
     async def execute_parallel(self, tasks: list[dict[str, Any]]) -> list[TaskResult]:
         """Execute multiple tasks in parallel across teams."""

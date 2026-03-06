@@ -24,6 +24,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from forge.runtime.guardrails import GuardrailsEngine
+from forge.runtime.observability import EventLog, TraceContext
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,16 +69,32 @@ class OrchestratorAgent:
         model: str = "gpt-4o",
         max_iterations: int = 200,
         quality_bar: str = "production-ready",
+        max_duration_seconds: float = 3600.0,
+        max_cost_usd: float = 10.0,
     ):
         self._llm_client = llm_client
         self.model = model
         self.max_iterations = max_iterations
         self.quality_bar = quality_bar
+        self.max_duration_seconds = max_duration_seconds
+        self.max_cost_usd = max_cost_usd
         self._tools: list[Any] = []
         self._tool_map: dict[str, Any] = {}
+        self._event_log: EventLog | None = None
+        self._trace_ctx: TraceContext | None = None
+        self._guardrails: GuardrailsEngine | None = None
 
     def set_llm_client(self, client: Any) -> None:
         self._llm_client = client
+
+    def set_event_log(self, log: EventLog) -> None:
+        self._event_log = log
+
+    def set_trace_context(self, ctx: TraceContext) -> None:
+        self._trace_ctx = ctx
+
+    def set_guardrails(self, guardrails: GuardrailsEngine) -> None:
+        self._guardrails = guardrails
 
     def _ensure_tools(self) -> None:
         """Load all primitive tools."""
@@ -114,6 +133,7 @@ class OrchestratorAgent:
 
         start_time = time.time()
         files_created: list[str] = []
+        total_tokens = 0
 
         logger.info(f"=== ORCHESTRATOR START ===")
         logger.info(f"Task: {task[:100]}")
@@ -126,8 +146,8 @@ class OrchestratorAgent:
             git_tool = self._tool_map.get("git_operation")
             if git_tool:
                 await git_tool.run(operation="init", workdir=str(project_dir))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Git init skipped: {e}")
 
         # Find Python executable
         python_path = "python"
@@ -192,7 +212,7 @@ class OrchestratorAgent:
             "   → create proper integration code with error handling\n"
             "6. For web dashboards: create real HTML with CSS styling.\n"
             f"7. Always use '{python_path}' not 'python' for running Python.\n"
-            "8. When COMPLETELY satisfied the project is production-quality, say DONE.\n\n"
+            "8. When COMPLETELY satisfied the project is production-quality, respond with the JSON: {\"status\": \"DONE\", \"summary\": \"<brief summary>\"}. You may also simply say DONE.\n\n"
             
             "═══ AVAILABLE TOOLS ═══\n"
             "- read_write_file(action, path, content): Create/read/edit/list/delete files\n"
@@ -218,6 +238,11 @@ class OrchestratorAgent:
             iterations = iteration + 1
             logger.info(f"\n--- Iteration {iterations}/{self.max_iterations} ---")
 
+            elapsed = time.time() - start_time
+            if elapsed > self.max_duration_seconds:
+                logger.warning(f"  ⏰ Orchestrator timeout after {elapsed:.0f}s (limit: {self.max_duration_seconds}s)")
+                break
+
             try:
                 # THINK: Call LLM with current conversation + tools
                 kwargs: dict[str, Any] = {
@@ -230,6 +255,16 @@ class OrchestratorAgent:
 
                 response = await self._llm_client.chat.completions.create(**kwargs)
                 choice = response.choices[0]
+
+                # Track token usage
+                if hasattr(response, 'usage') and response.usage:
+                    total_tokens += getattr(response.usage, 'total_tokens', 0)
+
+                # Check cost budget
+                estimated_cost = total_tokens * 0.00003  # rough estimate ~$30/1M tokens
+                if estimated_cost > self.max_cost_usd:
+                    logger.warning(f"  💰 Cost budget exceeded: ${estimated_cost:.2f} > ${self.max_cost_usd:.2f}")
+                    break
 
                 # ACT: If tool calls, execute them
                 if choice.message.tool_calls:
@@ -256,6 +291,19 @@ class OrchestratorAgent:
                             args = {}
 
                         tool = self._tool_map.get(fn_name)
+
+                        # Guardrails check
+                        if self._guardrails:
+                            violations = self._guardrails.check_tool_call(fn_name, args)
+                            blocked = [v for v in violations if v.severity == "block"]
+                            if blocked:
+                                conversation.append({
+                                    "role": "tool",
+                                    "content": f"Blocked by guardrails: {blocked[0].description}",
+                                    "tool_call_id": tc.id,
+                                })
+                                continue
+
                         if tool:
                             try:
                                 # Set workdir for command/file tools
@@ -268,6 +316,13 @@ class OrchestratorAgent:
 
                                 output = await tool.run(**args)
                                 logger.info(f"  🔧 {fn_name}: {str(output)[:80]}")
+
+                                if self._event_log:
+                                    self._event_log.emit_tool_result(
+                                        agent_name="orchestrator", tool_name=fn_name, success=True,
+                                        output_preview=str(output)[:200], duration_ms=0.0,
+                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                                    )
 
                                 # Track files created during the loop (not just at end)
                                 if fn_name == "read_write_file" and "path" in args:
@@ -282,6 +337,12 @@ class OrchestratorAgent:
                                 })
                             except Exception as e:
                                 logger.warning(f"  ❌ {fn_name} error: {e}")
+                                if self._event_log:
+                                    self._event_log.emit_tool_result(
+                                        agent_name="orchestrator", tool_name=fn_name, success=False,
+                                        output_preview=str(e)[:200], duration_ms=0.0,
+                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                                    )
                                 conversation.append({
                                     "role": "tool",
                                     "content": f"Error: {e}",
@@ -300,14 +361,25 @@ class OrchestratorAgent:
                 text_output = choice.message.content or ""
                 conversation.append({"role": "assistant", "content": text_output})
 
-                # Check if agent says it's done — require "DONE" as a standalone declaration
+                # Check for structured completion signal first (preferred)
+                try:
+                    completion = json.loads(text_output.strip())
+                    if isinstance(completion, dict) and completion.get("status", "").upper() == "DONE":
+                        project_complete = True
+                        logger.info(f"  ✅ Agent declares project complete (structured)")
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+                # Fall back to string-based DONE detection
+                text_upper = text_output.strip().upper()
                 done_signals = [
-                    text_output.strip().upper().startswith("DONE"),
-                    text_output.strip().upper().endswith("DONE"),
-                    "PROJECT IS COMPLETE" in text_output.upper(),
-                    "\nDONE\n" in f"\n{text_output}\n",
-                    text_output.strip().upper() == "DONE",
-                    "DONE." == text_output.strip().upper()[:5] if len(text_output.strip()) <= 200 else False,
+                    text_upper == "DONE",
+                    text_upper == "DONE.",
+                    text_upper.startswith("DONE\n") or text_upper.startswith("DONE."),
+                    text_upper.endswith("\nDONE") or text_upper.endswith("\nDONE."),
+                    "PROJECT IS COMPLETE" in text_upper,
+                    "\nDONE\n" in f"\n{text_output.strip()}\n",
                 ]
                 if any(done_signals) and len(files_created) >= 1:
                     project_complete = True
@@ -347,9 +419,12 @@ class OrchestratorAgent:
                             temperature=0.2,
                         )
                         state_summary = summary_resp.choices[0].message.content or ""
+                        if hasattr(summary_resp, 'usage') and summary_resp.usage:
+                            total_tokens += getattr(summary_resp.usage, 'total_tokens', 0)
                         # Pin as a persistent context message right after system
                         pinned = {"role": "user", "content": f"[PROJECT STATE - iteration {iterations}]: {state_summary}"}
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"State summary generation failed: {e}")
                         pinned = {"role": "user", "content": f"[PROJECT STATE]: Files created: {', '.join(files_created[-20:])}"}
                 else:
                     pinned = None
@@ -411,6 +486,7 @@ class OrchestratorAgent:
             files_created=sorted(files_created),
             iterations=iterations,
             duration_seconds=round(duration, 1),
+            total_tokens=total_tokens,
             summary="\n".join(summary_lines),
         )
 
