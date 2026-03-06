@@ -103,7 +103,8 @@ def create(domain, file, output, model, overwrite, api_key, base_url, pack, foun
 
         console.print(f"[bold cyan]📦 Using domain pack: {pack}[/bold cyan]")
         blueprint = create_from_pack(pack)
-        blueprint = inject_archetypes(blueprint)
+        if not founder_mode:
+            blueprint = inject_archetypes(blueprint)
 
         gen = AgencyGenerator(output_base=Path(output))
         try:

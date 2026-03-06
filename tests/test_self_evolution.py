@@ -163,12 +163,13 @@ class TestDeepMutations:
     async def test_model_downgrade_on_high_success(self):
         """High-performing agent on expensive model gets downgraded."""
         agent = self._make_agent(model="gpt-4")
-        tracker = self._make_tracker_for_agent("TestAgent", success_rate=0.95, quality=0.85, count=10)
+        tracker = self._make_tracker_for_agent("TestAgent", success_rate=1.0, quality=0.9, count=10)
+        agent._performance_tracker = tracker
 
         client = AsyncMock()
         resp = MagicMock()
         resp.choices = [MagicMock()]
-        resp.choices[0].message.content = "[]"
+        resp.choices[0].message.content = '{"improvements": []}'
         client.chat.completions.create = AsyncMock(return_value=resp)
 
         evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
@@ -176,46 +177,48 @@ class TestDeepMutations:
 
         # Should have attempted a model downgrade
         model_records = [r for r in records if r.change_type == "model_downgrade"]
-        if model_records:
-            assert agent.model in ("gpt-4o", "gpt-4o-mini")
+        assert len(model_records) > 0, "Expected at least one model_downgrade record"
+        assert agent.model in ("gpt-4o", "gpt-4o-mini")
 
     @pytest.mark.asyncio
     async def test_temperature_decrease_on_low_success(self):
         """Struggling agent gets lower temperature for consistency."""
         agent = self._make_agent(temperature=0.7)
         tracker = self._make_tracker_for_agent("TestAgent", success_rate=0.5, quality=0.5, count=10)
+        agent._performance_tracker = tracker
 
         client = AsyncMock()
         resp = MagicMock()
         resp.choices = [MagicMock()]
-        resp.choices[0].message.content = "[]"
+        resp.choices[0].message.content = '{"improvements": []}'
         client.chat.completions.create = AsyncMock(return_value=resp)
 
         evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
         records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
 
         temp_records = [r for r in records if r.change_type == "temperature_decrease"]
-        if temp_records:
-            assert agent.temperature < 0.7
+        assert len(temp_records) > 0, "Expected at least one temperature_decrease record"
+        assert agent.temperature < 0.7
 
     @pytest.mark.asyncio
     async def test_reflection_enabled_for_low_quality(self):
         """Low-quality agent gets reflection enabled."""
         agent = self._make_agent(enable_reflection=False)
         tracker = self._make_tracker_for_agent("TestAgent", success_rate=0.6, quality=0.4, count=10)
+        agent._performance_tracker = tracker
 
         client = AsyncMock()
         resp = MagicMock()
         resp.choices = [MagicMock()]
-        resp.choices[0].message.content = "[]"
+        resp.choices[0].message.content = '{"improvements": []}'
         client.chat.completions.create = AsyncMock(return_value=resp)
 
         evo = SelfEvolution(tracker, SharedMemory(), llm_client=client)
         records = await evo.run_evolution_cycle(agents={"TestAgent": agent})
 
         reflection_records = [r for r in records if r.change_type == "enable_reflection"]
-        if reflection_records:
-            assert agent.enable_reflection is True
+        assert len(reflection_records) > 0, "Expected at least one enable_reflection record"
+        assert agent.enable_reflection is True
 
     @pytest.mark.asyncio
     async def test_no_mutation_with_insufficient_data(self):
@@ -306,7 +309,11 @@ class TestPromptOptimizerCompile:
         client.chat.completions.create = AsyncMock(
             return_value=_mock_llm_response("Improved prompt that handles failed_task errors better")
         )
-        optimizer = PromptOptimizer(client, tracker)
+
+        async def score_fn(prompt, agent_name):
+            return 0.5
+
+        optimizer = PromptOptimizer(client, tracker, metric_fn=score_fn)
         agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
         result = await optimizer.compile(agent, n_candidates=3, min_samples=5)
         assert client.chat.completions.create.call_count == 3
@@ -327,11 +334,15 @@ class TestPromptOptimizerCompile:
             return _mock_llm_response("Generic improvement without specifics")
 
         client.chat.completions.create = AsyncMock(side_effect=varying_responses)
-        optimizer = PromptOptimizer(client, tracker)
+
+        async def score_fn(prompt, agent_name):
+            return 0.9 if "failed_task" in prompt.lower() else 0.4
+
+        optimizer = PromptOptimizer(client, tracker, metric_fn=score_fn)
         agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
         result = await optimizer.compile(agent, n_candidates=3, min_samples=5)
-        if result.improved:
-            assert "failed_task" in result.new_prompt.lower()
+        assert result.improved, "Expected optimizer to find an improvement"
+        assert "failed_task" in result.new_prompt.lower()
 
     @pytest.mark.asyncio
     async def test_replaces_prompt_not_appends(self):
@@ -342,13 +353,17 @@ class TestPromptOptimizerCompile:
         client.chat.completions.create = AsyncMock(
             return_value=_mock_llm_response(new_prompt_text)
         )
-        optimizer = PromptOptimizer(client, tracker)
+
+        async def score_fn(prompt, agent_name):
+            return 0.9 if prompt == new_prompt_text else 0.4
+
+        optimizer = PromptOptimizer(client, tracker, metric_fn=score_fn)
         original = "Original system prompt for test agent"
         agent = Agent(name="TestAgent", role="test", system_prompt=original)
         result = await optimizer.compile(agent, n_candidates=1, min_samples=5)
-        if result.improved:
-            assert original not in agent.system_prompt
-            assert agent.system_prompt == new_prompt_text
+        assert result.improved, "Expected optimizer to find an improvement"
+        assert original not in agent.system_prompt
+        assert agent.system_prompt == new_prompt_text
 
     @pytest.mark.asyncio
     async def test_stores_old_prompt_for_rollback(self):
