@@ -221,7 +221,9 @@ class SelfEvolution:
 
         # === DEEP MUTATIONS: Beyond prompt-append ===
         # These mutations change agent configuration, not just prompts.
-        
+        # Save state before mutations for rollback
+        _mutation_snapshots: dict[str, dict[str, Any]] = {}
+
         if not agents:
             return records
             
@@ -379,6 +381,57 @@ class SelfEvolution:
                     agent.system_prompt = base + "".join(f"\n\n[Auto-improvement]:{imp}" for imp in kept)
                     cleaned += blocks - len(kept)
         return cleaned
+
+    def rollback_mutation(self, agent: Any, mutation_record: EvolutionRecord) -> bool:
+        """Rollback a specific mutation if performance degraded.
+        
+        Checks post-mutation performance against pre-mutation baseline.
+        Returns True if rollback was applied.
+        """
+        if not self._tracker or not hasattr(agent, 'name'):
+            return False
+        
+        agent_name = agent.name
+        stats = self._tracker.get_agent_stats(agent_name) if hasattr(self._tracker, 'get_agent_stats') else {}
+        if not stats:
+            return False
+        
+        current_success = stats.get("success_rate", stats.get("tasks", {}).get("success_rate", 1.0))
+        before_score = mutation_record.before_score
+        
+        # Rollback if performance dropped by more than 10%
+        if current_success < before_score - 0.1:
+            change_type = mutation_record.change_type
+            
+            if change_type == "model_downgrade" and hasattr(agent, 'model'):
+                # Restore to more expensive model
+                upgrades = {"gpt-4o-mini": "gpt-4o", "gpt-4o": "gpt-4"}
+                if agent.model in upgrades:
+                    agent.model = upgrades[agent.model]
+                    logger.info(f"  ⏪ Rollback: {agent_name} model restored to {agent.model}")
+                    return True
+            
+            elif change_type == "temperature_decrease" and hasattr(agent, 'temperature'):
+                agent.temperature = min(1.0, agent.temperature + 0.2)
+                logger.info(f"  ⏪ Rollback: {agent_name} temperature restored to {agent.temperature}")
+                return True
+            
+            elif change_type == "temperature_increase" and hasattr(agent, 'temperature'):
+                agent.temperature = max(0.1, agent.temperature - 0.15)
+                logger.info(f"  ⏪ Rollback: {agent_name} temperature restored to {agent.temperature}")
+                return True
+            
+            elif change_type == "enable_reflection" and hasattr(agent, 'enable_reflection'):
+                agent.enable_reflection = False
+                logger.info(f"  ⏪ Rollback: {agent_name} reflection disabled")
+                return True
+            
+            elif change_type == "increase_iterations" and hasattr(agent, 'max_iterations'):
+                agent.max_iterations = max(10, agent.max_iterations - 10)
+                logger.info(f"  ⏪ Rollback: {agent_name} max_iterations restored to {agent.max_iterations}")
+                return True
+        
+        return False
 
     def __repr__(self) -> str:
         return f"SelfEvolution(cycles={self._cycle_count}, improvements={len(self._history)})"

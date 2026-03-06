@@ -1,7 +1,7 @@
 """Hard phase gates for the orchestrator agent loop.
 
 Enforces that agents MUST complete each phase before advancing:
-RESEARCH → BUILD → TEST → VERIFY
+RESEARCH → PLAN_SPEC → BUILD → TEST → VERIFY
 
 Phase completion is verified by checking concrete artifacts,
 not by trusting the agent's self-report.
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 class Phase(str, Enum):
     """Orchestrator execution phases."""
     RESEARCH = "research"
+    PLAN_SPEC = "plan_spec"
     BUILD = "build"
     TEST = "test"
     VERIFY = "verify"
@@ -34,6 +35,11 @@ PHASE_REQUIREMENTS = {
         "min_iterations": 2,
         "required_tools": ["browse_web", "web_search"],  # Must use at least one
         "description": "Research the domain, APIs, and requirements before building",
+    },
+    Phase.PLAN_SPEC: {
+        "must_create_spec": True,
+        "spec_patterns": ["spec", "plan", "architecture", "design", "ARCHITECTURE"],
+        "description": "Create a project specification: architecture, file structure, dependencies, and acceptance criteria",
     },
     Phase.BUILD: {
         "min_files": 2,
@@ -126,10 +132,13 @@ class PhaseGateEnforcer:
         - VERIFY: no restrictions
         """
         if self._current_phase == Phase.RESEARCH:
-            # During research, block build-only tools to enforce actual research
             blocked_in_research = {"run_command", "git_operation", "query_database"}
             if tool_name in blocked_in_research:
                 return False, f"Tool '{tool_name}' not allowed during RESEARCH phase. Use browse_web or web_search to research first."
+        elif self._current_phase == Phase.PLAN_SPEC:
+            blocked_in_planning = {"run_command", "git_operation", "query_database"}
+            if tool_name in blocked_in_planning:
+                return False, f"Tool '{tool_name}' not allowed during PLAN/SPEC phase. Create your project specification first using read_write_file."
         return True, ""
 
     def record_command_output(self, command: str, output: str) -> None:
@@ -178,6 +187,18 @@ class PhaseGateEnforcer:
             research_tools = reqs["required_tools"]
             used_research = any(t in status.tools_used for t in research_tools)
             if status.iterations_in_phase >= reqs["min_iterations"] and used_research:
+                self._advance_to(Phase.PLAN_SPEC)
+
+        elif self._current_phase == Phase.PLAN_SPEC:
+            spec_patterns = reqs["spec_patterns"]
+            all_files = []
+            for p_status in self._phases.values():
+                all_files.extend(p_status.files_created)
+            has_spec = any(
+                any(pat.lower() in f.lower() for pat in spec_patterns)
+                for f in all_files
+            )
+            if has_spec or status.iterations_in_phase >= 3:
                 self._advance_to(Phase.BUILD)
 
         elif self._current_phase == Phase.BUILD:
@@ -223,6 +244,16 @@ class PhaseGateEnforcer:
                 "- Study similar projects and their architecture\n"
                 "You cannot proceed to BUILD until you've done research.\n"
             )
+        elif phase == Phase.PLAN_SPEC:
+            return (
+                header +
+                "Create a PROJECT SPECIFICATION before building:\n"
+                "- Architecture: what components, how they connect\n"
+                "- File structure: list every file you'll create\n"
+                "- Dependencies: what packages/APIs are needed\n"
+                "- Acceptance criteria: how to verify it works\n"
+                "Use read_write_file to create a spec document (e.g., SPEC.md or ARCHITECTURE.md).\n"
+            )
         elif phase == Phase.BUILD:
             return (
                 header +
@@ -267,6 +298,9 @@ class PhaseGateEnforcer:
 
         if not self._phases[Phase.RESEARCH].completed:
             blockers.append("RESEARCH phase not completed — must research before building")
+
+        if not self._phases[Phase.PLAN_SPEC].completed:
+            blockers.append("PLAN/SPEC phase not completed — must create project specification before building")
 
         build_status = self._phases[Phase.BUILD]
         py_files = [f for f in build_status.files_created if f.endswith(".py")]

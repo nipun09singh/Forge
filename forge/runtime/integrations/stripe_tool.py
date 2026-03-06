@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 
 async def _stripe_action(action: str, amount: int = 0, currency: str = "usd",
                          customer_email: str = "", description: str = "",
-                         plan_id: str = "", customer_id: str = "") -> str:
-    """Execute a Stripe action (charge, create_customer, subscribe, list_charges)."""
+                         plan_id: str = "", customer_id: str = "",
+                         payment_method_id: str = "") -> str:
+    """Execute a Stripe action using Payment Intents API (charge, create_customer, subscribe, list_charges)."""
     api_key = os.environ.get("STRIPE_API_KEY", "")
 
     if not api_key:
@@ -65,11 +66,17 @@ async def _stripe_action(action: str, amount: int = 0, currency: str = "usd",
 
     try:
         if action == "charge":
-            data = urllib.parse.urlencode({
+            # Use Payment Intents API (modern) instead of Charges API
+            intent_data = {
                 "amount": amount, "currency": currency, "description": description,
-                "source": "tok_visa",
-            }).encode()
-            url = f"{base_url}/charges"
+            }
+            if payment_method_id:
+                intent_data["payment_method"] = payment_method_id
+                intent_data["confirm"] = "true"
+            if customer_id:
+                intent_data["customer"] = customer_id
+            data = urllib.parse.urlencode(intent_data).encode()
+            url = f"{base_url}/payment_intents"
         elif action == "create_customer":
             data = urllib.parse.urlencode({"email": customer_email}).encode()
             url = f"{base_url}/customers"
@@ -106,7 +113,8 @@ def create_stripe_tool() -> Tool:
             ToolParameter(name="customer_email", type="string", description="Customer email (for create_customer)", required=False),
             ToolParameter(name="description", type="string", description="Payment description", required=False),
             ToolParameter(name="plan_id", type="string", description="Plan/price ID (for subscribe)", required=False),
-            ToolParameter(name="customer_id", type="string", description="Customer ID (for subscribe)", required=False),
+            ToolParameter(name="customer_id", type="string", description="Customer ID (for subscribe/charge)", required=False),
+            ToolParameter(name="payment_method_id", type="string", description="Payment method ID (for charges via Payment Intents)", required=False),
         ],
         _fn=_stripe_action,
     )

@@ -7,6 +7,7 @@ from forge.runtime.phase_gates import Phase, PhaseGateEnforcer, PhaseStatus, PHA
 class TestPhaseEnum:
     def test_phase_values(self):
         assert Phase.RESEARCH == "research"
+        assert Phase.PLAN_SPEC == "plan_spec"
         assert Phase.BUILD == "build"
         assert Phase.TEST == "test"
         assert Phase.VERIFY == "verify"
@@ -24,6 +25,7 @@ class TestPhaseGateInit:
 
     def test_other_phases_not_entered(self):
         e = PhaseGateEnforcer("/tmp/test")
+        assert e._phases[Phase.PLAN_SPEC].entered is False
         assert e._phases[Phase.BUILD].entered is False
         assert e._phases[Phase.TEST].entered is False
         assert e._phases[Phase.VERIFY].entered is False
@@ -52,14 +54,14 @@ class TestResearchPhaseGate:
         e.record_tool_use("browse_web")
         e.tick()
         e.tick()  # min 2 iterations
-        assert e.current_phase == Phase.BUILD
+        assert e.current_phase == Phase.PLAN_SPEC
 
     def test_research_advances_with_web_search(self):
         e = PhaseGateEnforcer("/tmp/test")
         e.record_tool_use("web_search")
         e.tick()
         e.tick()
-        assert e.current_phase == Phase.BUILD
+        assert e.current_phase == Phase.PLAN_SPEC
 
     def test_no_bypass_at_5_iterations(self):
         """The old _total_iterations > 5 bypass must not exist."""
@@ -76,12 +78,58 @@ class TestResearchPhaseGate:
         assert e.current_phase == Phase.RESEARCH
 
 
+class TestPlanSpecPhaseGate:
+    """PLAN_SPEC phase: must create spec/architecture document."""
+
+    def _enter_plan_spec(self, e):
+        e.record_tool_use("browse_web")
+        e.tick()
+        e.tick()
+        assert e.current_phase == Phase.PLAN_SPEC
+
+    def test_research_advances_to_plan_spec(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        e.record_tool_use("browse_web")
+        e.tick()
+        e.tick()
+        assert e.current_phase == Phase.PLAN_SPEC
+
+    def test_plan_spec_blocks_run_command(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_plan_spec(e)
+        allowed, _ = e.is_tool_allowed("run_command")
+        assert allowed is False
+
+    def test_plan_spec_allows_read_write_file(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_plan_spec(e)
+        allowed, _ = e.is_tool_allowed("read_write_file")
+        assert allowed is True
+
+    def test_plan_spec_advances_with_spec_file(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_plan_spec(e)
+        e.record_file_created("ARCHITECTURE.md")
+        e.tick()
+        assert e.current_phase == Phase.BUILD
+
+    def test_plan_spec_advances_after_3_iterations(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        self._enter_plan_spec(e)
+        e.tick()
+        e.tick()
+        e.tick()
+        assert e.current_phase == Phase.BUILD
+
+
 class TestBuildPhaseGate:
     """BUILD phase: must create ≥2 Python files."""
 
     def _enter_build(self, e: PhaseGateEnforcer):
         e.record_tool_use("browse_web")
         e.tick()
+        e.tick()
+        e.record_file_created("SPEC.md")
         e.tick()
         assert e.current_phase == Phase.BUILD
 
@@ -121,6 +169,8 @@ class TestTestPhaseGate:
     def _enter_test(self, e: PhaseGateEnforcer):
         e.record_tool_use("browse_web")
         e.tick()
+        e.tick()
+        e.record_file_created("SPEC.md")
         e.tick()
         e.record_file_created("main.py")
         e.record_file_created("test_main.py")
@@ -165,6 +215,8 @@ class TestVerifyPhaseGate:
     def _enter_verify(self, e: PhaseGateEnforcer):
         e.record_tool_use("browse_web")
         e.tick()
+        e.tick()
+        e.record_file_created("SPEC.md")
         e.tick()
         e.record_file_created("main.py")
         e.record_file_created("test_main.py")
@@ -214,6 +266,8 @@ class TestCanComplete:
         e.record_tool_use("browse_web")
         e.tick()
         e.tick()
+        e.record_file_created("SPEC.md")
+        e.tick()
         e.record_file_created("main.py")
         e.record_file_created("app.py")
         e.record_file_created("README.md")
@@ -225,11 +279,15 @@ class TestCanComplete:
         assert any("pass" in b.lower() for b in blockers)
 
     def test_full_lifecycle_can_complete(self):
-        """Full happy path: research -> build -> test (pass) -> verify -> DONE."""
+        """Full happy path: research -> plan_spec -> build -> test (pass) -> verify -> DONE."""
         e = PhaseGateEnforcer("/tmp/test")
         # Research
         e.record_tool_use("web_search")
         e.tick()
+        e.tick()
+        assert e.current_phase == Phase.PLAN_SPEC
+        # Plan/Spec
+        e.record_file_created("SPEC.md")
         e.tick()
         assert e.current_phase == Phase.BUILD
         # Build
@@ -269,6 +327,8 @@ class TestPhaseInstruction:
         e.record_tool_use("browse_web")
         e.tick()
         e.tick()
+        e.record_file_created("SPEC.md")
+        e.tick()
         instr = e.get_phase_instruction()
         assert "BUILD" in instr
 
@@ -276,6 +336,8 @@ class TestPhaseInstruction:
         e = PhaseGateEnforcer("/tmp/test")
         e.record_tool_use("browse_web")
         e.tick()
+        e.tick()
+        e.record_file_created("SPEC.md")
         e.tick()
         e.record_file_created("a.py")
         e.record_file_created("b.py")
@@ -323,6 +385,8 @@ class TestToolBlocking:
         e.record_tool_use("browse_web")
         e.tick()
         e.tick()
+        e.record_file_created("SPEC.md")
+        e.tick()
         assert e.current_phase == Phase.BUILD
         allowed, _ = e.is_tool_allowed("run_command")
         assert allowed is True
@@ -336,6 +400,8 @@ class TestAntiSpoofing:
     def _enter_test(self, e):
         e.record_tool_use("browse_web")
         e.tick()
+        e.tick()
+        e.record_file_created("SPEC.md")
         e.tick()
         e.record_file_created("main.py")
         e.record_file_created("test_main.py")
