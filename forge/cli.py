@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -397,6 +398,194 @@ def list_packs():
 
     console.print(table)
     console.print("\n[dim]Usage: forge create --pack <pack_name>[/dim]")
+
+
+@main.command()
+@click.argument("agency_path", type=click.Path(exists=True))
+@click.option("--port", default=8000, help="Port to expose (default: 8000)")
+@click.option("--name", default=None, help="Container name (defaults to agency directory name)")
+@click.option("--detach", "-d", is_flag=True, help="Run container in background")
+@click.option("--build-only", is_flag=True, help="Build image without running")
+def deploy(agency_path, port, name, detach, build_only):
+    """Deploy a generated agency as a Docker container.
+
+    Builds a Docker image from the agency directory and runs it,
+    making the API available on the specified port.
+
+    Example:
+        forge deploy ./my-agency
+        forge deploy ./my-agency --port 9000 --detach
+        forge deploy ./my-agency --build-only
+    """
+    import subprocess
+    import shutil
+    from pathlib import Path
+
+    agency_dir = Path(agency_path).resolve()
+    if not (agency_dir / "api_server.py").exists():
+        click.secho(f"Error: {agency_dir} doesn't look like a generated agency (no api_server.py)", fg="red")
+        raise SystemExit(1)
+
+    if not shutil.which("docker"):
+        click.secho("Error: Docker is not installed or not in PATH", fg="red")
+        click.echo("Install Docker: https://docs.docker.com/get-docker/")
+        raise SystemExit(1)
+
+    container_name = name or agency_dir.name.lower().replace(" ", "-")
+    image_name = f"forge-{container_name}"
+
+    # Generate Dockerfile
+    dockerfile_path = agency_dir / "Dockerfile"
+    if not dockerfile_path.exists():
+        click.echo("📝 Generating Dockerfile...")
+        dockerfile_content = f"""FROM python:3.11-slim
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends git curl && rm -rf /var/lib/apt/lists/*
+
+# Copy agency code
+COPY . .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir openai pydantic fastapi uvicorn rich tiktoken 2>/dev/null || \\
+    pip install --no-cache-dir openai pydantic fastapi uvicorn rich
+
+# Install forge runtime if available
+RUN if [ -d "forge" ]; then cd /app && pip install --no-cache-dir -e . 2>/dev/null || true; fi
+
+EXPOSE {port}
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\
+    CMD curl -f http://localhost:{port}/health || exit 1
+
+CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
+"""
+        dockerfile_path.write_text(dockerfile_content)
+        click.echo(f"  ✅ Dockerfile created at {dockerfile_path}")
+
+    # Build Docker image
+    click.echo(f"\n🔨 Building Docker image: {image_name}")
+    result = subprocess.run(
+        ["docker", "build", "-t", image_name, "."],
+        cwd=str(agency_dir),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        click.secho(f"Build failed:\n{result.stderr}", fg="red")
+        raise SystemExit(1)
+    click.secho(f"  ✅ Image built: {image_name}", fg="green")
+
+    if build_only:
+        click.echo(f"\nRun manually: docker run -p {port}:{port} -e OPENAI_API_KEY=$OPENAI_API_KEY {image_name}")
+        return
+
+    # Run container
+    click.echo(f"\n🚀 Starting container: {container_name}")
+    
+    # Stop existing container if running
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+
+    run_cmd = [
+        "docker", "run",
+        "--name", container_name,
+        "-p", f"{port}:{port}",
+        "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
+        "-e", f"AGENCY_API_KEY={os.environ.get('AGENCY_API_KEY', '')}",
+    ]
+    if detach:
+        run_cmd.append("-d")
+    run_cmd.append(image_name)
+
+    if detach:
+        result = subprocess.run(run_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            click.secho(f"Failed to start: {result.stderr}", fg="red")
+            raise SystemExit(1)
+        click.echo()
+        click.secho(f"  ✅ Agency deployed!", fg="green", bold=True)
+        click.echo(f"\n  🌐 API:        http://localhost:{port}")
+        click.echo(f"  📋 Health:     http://localhost:{port}/health")
+        click.echo(f"  📊 Status:     http://localhost:{port}/api/status")
+        click.echo(f"  📡 Events:     http://localhost:{port}/api/events")
+        click.echo(f"\n  Stop:  docker stop {container_name}")
+        click.echo(f"  Logs:  docker logs -f {container_name}")
+    else:
+        click.echo(f"\n  🌐 Starting on http://localhost:{port}")
+        click.echo(f"  Press Ctrl+C to stop\n")
+        subprocess.run(run_cmd)
+
+
+@main.command()
+@click.argument("agency_path", type=click.Path(exists=True), required=False)
+@click.option("--port", default=8080, help="Dashboard port (default: 8080)")
+@click.option("--api-url", default=None, help="Agency API URL (default: auto-detect)")
+def dashboard(agency_path, port, api_url):
+    """Launch the Forge web dashboard for monitoring an agency.
+
+    If agency_path is provided, starts both the agency API and dashboard.
+    If --api-url is provided, connects to an already-running agency.
+
+    Example:
+        forge dashboard ./my-agency
+        forge dashboard --api-url http://localhost:8000
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    try:
+        import uvicorn
+        from fastapi import FastAPI
+        from fastapi.responses import HTMLResponse
+    except ImportError:
+        click.secho("Error: FastAPI and uvicorn required. Run: pip install fastapi uvicorn", fg="red")
+        raise SystemExit(1)
+
+    from forge.dashboard.app import get_dashboard_html
+
+    # Create a minimal FastAPI app that serves the dashboard
+    app = FastAPI(title="Forge Dashboard")
+
+    target_api = api_url or f"http://localhost:8000"
+
+    @app.get("/", response_class=HTMLResponse)
+    async def serve_dashboard():
+        html = get_dashboard_html()
+        # Inject the API base URL
+        html = html.replace(
+            "const API_BASE = window.location.origin;",
+            f'const API_BASE = "{target_api}";',
+        )
+        return HTMLResponse(content=html)
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "service": "forge-dashboard"}
+
+    # If agency path provided, start the agency API in background
+    agency_process = None
+    if agency_path:
+        agency_dir = Path(agency_path).resolve()
+        if (agency_dir / "api_server.py").exists():
+            click.echo(f"🚀 Starting agency API from {agency_dir}...")
+            agency_process = subprocess.Popen(
+                [sys.executable, "-m", "uvicorn", "api_server:app",
+                 "--host", "0.0.0.0", "--port", "8000"],
+                cwd=str(agency_dir),
+            )
+            click.echo(f"  ✅ Agency API starting on http://localhost:8000")
+
+    click.echo(f"\n📊 Forge Dashboard: http://localhost:{port}")
+    click.echo(f"   Connected to: {target_api}")
+    click.echo(f"   Press Ctrl+C to stop\n")
+
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    finally:
+        if agency_process:
+            agency_process.terminate()
 
 
 if __name__ == "__main__":

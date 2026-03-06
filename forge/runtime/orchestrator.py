@@ -28,6 +28,7 @@ from forge.runtime.types import LLMClient
 
 from forge.runtime.guardrails import GuardrailsEngine
 from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS
+from forge.runtime.phase_gates import PhaseGateEnforcer
 from forge.runtime.structured_outputs import parse_completion_signal
 from forge.runtime.token_manager import TokenCounter
 
@@ -138,6 +139,7 @@ class OrchestratorAgent:
 
         start_time = time.time()
         files_created: list[str] = []
+        phase_enforcer = PhaseGateEnforcer(project_dir)
         total_tokens = 0
         total_cost = 0.0
 
@@ -249,6 +251,8 @@ class OrchestratorAgent:
             if elapsed > self.max_duration_seconds:
                 logger.warning(f"  ⏰ Orchestrator timeout after {elapsed:.0f}s (limit: {self.max_duration_seconds}s)")
                 break
+
+            phase_enforcer.tick()
 
             try:
                 # THINK: Call LLM with current conversation + tools
@@ -371,6 +375,13 @@ class OrchestratorAgent:
                                     rel = os.path.relpath(args["path"], str(project_dir))
                                     if rel not in files_created and not rel.startswith(".."):
                                         files_created.append(rel)
+                                        phase_enforcer.record_file_created(rel)
+
+                                phase_enforcer.record_tool_use(fn_name)
+                                if fn_name == "run_command":
+                                    phase_enforcer.record_command_output(
+                                        args.get("command", ""), str(output)
+                                    )
 
                                 conversation.append({
                                     "role": "tool",
@@ -414,17 +425,26 @@ class OrchestratorAgent:
                 # Check for completion signal (structured JSON or string patterns)
                 completion = parse_completion_signal(text_output)
                 if completion and len(files_created) >= 1:
+                    # Enforce phase gates before accepting completion
+                    can_complete, blockers = phase_enforcer.can_complete()
+                    if not can_complete:
+                        feedback = phase_enforcer.get_blocker_feedback()
+                        conversation.append({"role": "user", "content": feedback})
+                        logger.info(f"  ⛔ Completion blocked: {len(blockers)} unmet requirements")
+                        continue
                     project_complete = True
                     logger.info(f"  ✅ Agent declares project complete: {completion.summary[:80]}")
                     break
 
-                # If agent just talks without acting, nudge it
+                # If agent just talks without acting, nudge with phase context
+                phase_instruction = phase_enforcer.get_phase_instruction()
                 conversation.append({
                     "role": "user",
                     "content": (
                         "You haven't used any tools in this response. "
                         "Please USE your tools (read_write_file, run_command) to actually create files. "
-                        "Don't describe what you would do — DO it."
+                        "Don't describe what you would do — DO it.\n" +
+                        phase_instruction
                     ),
                 })
 

@@ -219,6 +219,111 @@ class SelfEvolution:
             if cleaned > 0:
                 logger.info(f"  Cleaned up {cleaned} old improvement blocks")
 
+        # === DEEP MUTATIONS: Beyond prompt-append ===
+        # These mutations change agent configuration, not just prompts.
+        
+        if not agents:
+            return records
+            
+        for agent_name, agent in agents.items():
+            if not hasattr(agent, '_performance_tracker') or not agent._performance_tracker:
+                continue
+                
+            agent_metrics = self._tracker.get_agent_stats(agent_name) if self._tracker else {}
+            if not agent_metrics:
+                continue
+            
+            success_rate = agent_metrics.get("success_rate", 1.0)
+            avg_quality = agent_metrics.get("avg_quality_score", 1.0)
+            task_count = agent_metrics.get("tasks", 0)
+            
+            if task_count < 5:
+                continue  # Need enough data
+            
+            # Mutation 1: Model routing evolution
+            # If agent is expensive but quality is high, try cheaper model
+            if hasattr(agent, 'model') and success_rate > 0.9 and avg_quality > 0.8:
+                current_model = agent.model
+                cheaper_models = {"gpt-4": "gpt-4o", "gpt-4o": "gpt-4o-mini"}
+                if current_model in cheaper_models:
+                    new_model = cheaper_models[current_model]
+                    old_model = agent.model
+                    agent.model = new_model
+                    logger.info(f"  🔄 Model evolution: {agent_name} {old_model} → {new_model} (success={success_rate:.0%}, quality={avg_quality:.0%})")
+                    records.append(EvolutionRecord(
+                        target_agent=agent_name,
+                        change_type="model_downgrade",
+                        description=f"Downgraded {old_model} → {new_model} (maintaining {success_rate:.0%} success rate)",
+                        before_score=success_rate,
+                        after_score=success_rate,  # Will be measured next cycle
+                        applied=True,
+                    ))
+            
+            # Mutation 2: Temperature tuning
+            # Low success → lower temperature (more deterministic)
+            # High success + low quality → raise temperature (more creative)
+            if hasattr(agent, 'temperature'):
+                if success_rate < 0.6 and agent.temperature > 0.2:
+                    old_temp = agent.temperature
+                    agent.temperature = max(0.1, agent.temperature - 0.2)
+                    logger.info(f"  🌡️ Temperature evolution: {agent_name} {old_temp} → {agent.temperature} (low success={success_rate:.0%})")
+                    records.append(EvolutionRecord(
+                        target_agent=agent_name,
+                        change_type="temperature_decrease",
+                        description=f"Lowered temperature {old_temp} → {agent.temperature} to improve consistency",
+                        before_score=success_rate,
+                        after_score=success_rate,
+                        applied=True,
+                    ))
+                elif success_rate > 0.9 and avg_quality < 0.7 and agent.temperature < 0.9:
+                    old_temp = agent.temperature
+                    agent.temperature = min(1.0, agent.temperature + 0.15)
+                    logger.info(f"  🌡️ Temperature evolution: {agent_name} {old_temp} → {agent.temperature} (high success, low quality)")
+                    records.append(EvolutionRecord(
+                        target_agent=agent_name,
+                        change_type="temperature_increase",
+                        description=f"Raised temperature {old_temp} → {agent.temperature} for more creative outputs",
+                        before_score=avg_quality,
+                        after_score=avg_quality,
+                        applied=True,
+                    ))
+            
+            # Mutation 3: Enable reflection for struggling agents
+            if hasattr(agent, 'enable_reflection') and not agent.enable_reflection:
+                if success_rate < 0.7 or avg_quality < 0.6:
+                    agent.enable_reflection = True
+                    agent.max_reflections = 3
+                    logger.info(f"  🪞 Reflection evolution: enabled for {agent_name} (success={success_rate:.0%}, quality={avg_quality:.0%})")
+                    records.append(EvolutionRecord(
+                        target_agent=agent_name,
+                        change_type="enable_reflection",
+                        description=f"Enabled self-reflection (success={success_rate:.0%}, quality={avg_quality:.0%})",
+                        before_score=avg_quality,
+                        after_score=avg_quality,
+                        applied=True,
+                    ))
+            
+            # Mutation 4: Increase iterations for agents hitting limits
+            if hasattr(agent, 'max_iterations'):
+                # Check if agent frequently hits max iterations (from failure patterns)
+                failure_patterns = self._tracker.get_failure_patterns() if self._tracker else []
+                hits_limit = any(
+                    p.get("agent") == agent_name and "max iterations" in p.get("task", "").lower()
+                    for p in failure_patterns
+                ) if failure_patterns else False
+                if hits_limit and agent.max_iterations < 50:
+                    old_max = agent.max_iterations
+                    agent.max_iterations = min(50, agent.max_iterations + 10)
+                    logger.info(f"  🔄 Iteration evolution: {agent_name} {old_max} → {agent.max_iterations}")
+                    records.append(EvolutionRecord(
+                        target_agent=agent_name,
+                        change_type="increase_iterations",
+                        description=f"Increased max_iterations {old_max} → {agent.max_iterations} (was hitting limit)",
+                        before_score=success_rate,
+                        after_score=success_rate,
+                        applied=True,
+                    ))
+
         logger.info(f"Evolution cycle {self._cycle_count} complete: {len(records)} improvements applied")
         return records
 

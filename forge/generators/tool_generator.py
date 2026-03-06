@@ -106,27 +106,28 @@ class ToolGenerator:
             )
             logger.info(f"Using built-in integration for tool: {blueprint.name} → {builtin}")
         else:
-            # Domain-specific tool: generate a thin wrapper that describes the task
+            # Domain-specific tool: generate a functional mock-backed tool
+            # Serialize parameters for the mock backend factory
+            import json as _json
+            params_literal = _json.dumps(
+                [{"name": self._sanitize_name(p.get("name", "arg")),
+                  "type": p.get("type", "string"),
+                  "description": p.get("description", p.get("name", ""))[:100],
+                  "required": p.get("required", True)}
+                 for p in blueprint.parameters]
+            )
             content = (
                 f'"""Domain tool: {safe_name}\n\n'
                 f'{safe_desc}\n'
                 f'"""\n\n'
-                f'from forge.runtime.tools import Tool, ToolParameter\n\n\n'
-                f'async def {safe_name}('
-                + ', '.join(self._sanitize_name(p.get("name", "arg")) for p in blueprint.parameters)
-                + ') -> str:\n'
-                f'    """{safe_desc}"""\n'
-                f'    task_context = (\n'
-                f'        "Task: {safe_desc}\\n"\n'
-            )
-            for p in blueprint.parameters:
-                pname = self._sanitize_name(p.get("name", "arg"))
-                content += f'        f"  {pname}: {{{pname}}}\\n"\n'
-            content += (
-                f'        "\\nUse your available tools (run_command, read_write_file, http_request, "\\n'
-                f'        "query_database) to accomplish this task. Create real files and run real commands."\n'
-                f'    )\n'
-                f'    return task_context\n\n\n'
+                f'from forge.runtime.tools import Tool, ToolParameter\n'
+                f'from forge.runtime.integrations.mock_backends import create_mock_tool_function\n\n\n'
+                f'# Create functional mock tool instead of stub\n'
+                f'{safe_name} = create_mock_tool_function(\n'
+                f'    "{safe_name}",\n'
+                f'    "{safe_desc}",\n'
+                f'    {params_literal},\n'
+                f')\n\n\n'
                 f'{safe_name}_tool = Tool(\n'
                 f'    name="{safe_name}",\n'
                 f'    description="{safe_desc}",\n'
@@ -147,7 +148,7 @@ class ToolGenerator:
                 f'    _fn={safe_name},\n'
                 f')\n'
             )
-            logger.info(f"Generated domain tool (agent-driven): {safe_name}")
+            logger.info(f"Generated domain tool (mock-backed): {safe_name}")
 
         output_path = output_dir / f"tool_{self._sanitize_name(blueprint.name)}.py"
         output_path.write_text(content, encoding="utf-8")
