@@ -81,11 +81,11 @@ class PromptOptimizer:
         failures = self.tracker.get_failure_patterns(limit=30)
         agent_failures = [f for f in failures if f.get("agent") == agent_name]
 
-        result.before_score = self.metric_fn(success_rate, avg_quality, agent_failures)
-
         # 2. Ask LLM to generate n_candidates prompt REWRITES
         old_prompt = agent.system_prompt
         result.old_prompt = old_prompt
+
+        result.before_score = await self.metric_fn(old_prompt, agent_name)
 
         candidates = []
         for i in range(n_candidates):
@@ -119,7 +119,7 @@ class PromptOptimizer:
         # 3. Score each candidate
         scored = []
         for candidate in candidates:
-            score = self.metric_fn(success_rate, avg_quality, agent_failures, candidate)
+            score = await self.metric_fn(candidate, agent_name)
             scored.append((score, candidate))
 
         result.candidates_evaluated = len(scored)
@@ -145,26 +145,40 @@ class PromptOptimizer:
         )
         return result
 
-    @staticmethod
-    def _default_metric(success_rate, avg_quality, failures, candidate_prompt=None):
-        """Default metric: weighted combination of success rate and quality.
+    async def _default_metric(self, candidate_prompt: str, agent_name: str) -> float:
+        """Score a candidate prompt by LLM evaluation against failure patterns."""
+        failures = self.tracker.get_failure_patterns(limit=10)
+        agent_failures = [f for f in failures if f.get("agent") == agent_name]
 
-        When a candidate_prompt is provided, award a bonus for each failure
-        pattern keyword addressed in the new prompt.
-        """
-        base = success_rate * 0.6 + avg_quality * 0.4
+        if not agent_failures:
+            return 0.5  # No data — neutral score
 
-        if candidate_prompt and failures:
-            addressed = 0
-            for f in failures:
-                task_text = f.get("task", "").lower()
-                keywords = [w for w in task_text.split() if len(w) > 3]
-                if any(kw in candidate_prompt.lower() for kw in keywords):
-                    addressed += 1
-            bonus = min(0.15, (addressed / max(len(failures), 1)) * 0.15)
-            return min(1.0, base + bonus)
+        failure_descriptions = "\n".join(
+            f"- Task: {f.get('task', '?')} | Quality: {f.get('quality_score', 'unknown')}"
+            for f in agent_failures[:5]
+        )
 
-        return base
+        messages = [
+            {"role": "system", "content": "You are evaluating an AI agent's system prompt for effectiveness. Score 0.0 to 1.0."},
+            {"role": "user", "content": (
+                f"PROMPT TO EVALUATE:\n{candidate_prompt[:2000]}\n\n"
+                f"KNOWN FAILURE PATTERNS THIS AGENT HAS:\n{failure_descriptions}\n\n"
+                f"Score this prompt 0.0-1.0 on how well it would handle these failure patterns. "
+                f"Return ONLY a number between 0.0 and 1.0."
+            )}
+        ]
+
+        try:
+            response = await self.llm_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.1,
+                max_tokens=10,
+            )
+            score_text = response.choices[0].message.content.strip()
+            return max(0.0, min(1.0, float(score_text)))
+        except Exception:
+            return 0.5  # Fallback on error
 
 
 class SelfEvolution:

@@ -282,6 +282,62 @@ class TestPromptOptimizerInit:
         assert optimizer.metric_fn is custom_fn
 
 
+class TestDefaultMetric:
+    """Tests for PromptOptimizer._default_metric (LLM-as-judge)."""
+
+    @pytest.mark.asyncio
+    async def test_calls_llm_for_evaluation(self):
+        """_default_metric should call the LLM to evaluate the candidate prompt."""
+        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
+        client = AsyncMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_mock_llm_response("0.85")
+        )
+        optimizer = PromptOptimizer(client, tracker)
+        score = await optimizer._default_metric("Test prompt", "TestAgent")
+        client.chat.completions.create.assert_called_once()
+        call_kwargs = client.chat.completions.create.call_args
+        assert call_kwargs.kwargs["model"] == "gpt-4o-mini"
+        assert score == 0.85
+
+    @pytest.mark.asyncio
+    async def test_returns_parsed_float(self):
+        """_default_metric should parse the LLM response as a float score."""
+        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
+        client = AsyncMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_mock_llm_response("0.72")
+        )
+        optimizer = PromptOptimizer(client, tracker)
+        score = await optimizer._default_metric("Some prompt", "TestAgent")
+        assert score == 0.72
+
+    @pytest.mark.asyncio
+    async def test_returns_fallback_on_llm_error(self):
+        """_default_metric should return 0.5 when the LLM call fails."""
+        tracker = _make_tracker_with_data("TestAgent", successes=5, failures=3)
+        client = AsyncMock()
+        client.chat.completions.create = AsyncMock(side_effect=Exception("API error"))
+        optimizer = PromptOptimizer(client, tracker)
+        score = await optimizer._default_metric("Some prompt", "TestAgent")
+        assert score == 0.5
+
+    @pytest.mark.asyncio
+    async def test_returns_neutral_when_no_failures(self):
+        """_default_metric should return 0.5 when the agent has no failure data."""
+        tracker = _make_tracker_with_data("TestAgent", successes=10, failures=0)
+        client = AsyncMock()
+        optimizer = PromptOptimizer(client, tracker)
+        score = await optimizer._default_metric("Some prompt", "TestAgent")
+        assert score == 0.5
+        client.chat.completions.create.assert_not_called()
+
+
+async def _async_metric_stub(candidate_prompt, agent_name):
+    """Simple async metric stub for compile tests: scores based on content length."""
+    return min(1.0, len(candidate_prompt) / 100.0)
+
+
 class TestPromptOptimizerCompile:
     """Tests for PromptOptimizer.compile()."""
 
@@ -309,11 +365,7 @@ class TestPromptOptimizerCompile:
         client.chat.completions.create = AsyncMock(
             return_value=_mock_llm_response("Improved prompt that handles failed_task errors better")
         )
-
-        async def score_fn(prompt, agent_name):
-            return 0.5
-
-        optimizer = PromptOptimizer(client, tracker, metric_fn=score_fn)
+        optimizer = PromptOptimizer(client, tracker, metric_fn=_async_metric_stub)
         agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
         result = await optimizer.compile(agent, n_candidates=3, min_samples=5)
         assert client.chat.completions.create.call_count == 3
@@ -330,18 +382,14 @@ class TestPromptOptimizerCompile:
             nonlocal call_count
             call_count += 1
             if call_count == 2:
-                return _mock_llm_response("Better prompt addressing failed_task issues directly")
-            return _mock_llm_response("Generic improvement without specifics")
+                return _mock_llm_response("Better prompt addressing failed_task issues directly -- this one is longer to score higher in the stub metric")
+            return _mock_llm_response("Short")
 
         client.chat.completions.create = AsyncMock(side_effect=varying_responses)
-
-        async def score_fn(prompt, agent_name):
-            return 0.9 if "failed_task" in prompt.lower() else 0.4
-
-        optimizer = PromptOptimizer(client, tracker, metric_fn=score_fn)
+        optimizer = PromptOptimizer(client, tracker, metric_fn=_async_metric_stub)
         agent = Agent(name="TestAgent", role="test", system_prompt="Original prompt")
         result = await optimizer.compile(agent, n_candidates=3, min_samples=5)
-        assert result.improved, "Expected optimizer to find an improvement"
+        assert result.improved
         assert "failed_task" in result.new_prompt.lower()
 
     @pytest.mark.asyncio
@@ -349,19 +397,15 @@ class TestPromptOptimizerCompile:
         """compile() must REPLACE the system prompt entirely, not append."""
         tracker = _make_tracker_with_data("TestAgent", successes=7, failures=5)
         client = AsyncMock()
-        new_prompt_text = "Completely new prompt addressing failed_task patterns"
+        new_prompt_text = "Completely new prompt addressing failed_task patterns -- long enough to outscore original in stub metric"
         client.chat.completions.create = AsyncMock(
             return_value=_mock_llm_response(new_prompt_text)
         )
-
-        async def score_fn(prompt, agent_name):
-            return 0.9 if prompt == new_prompt_text else 0.4
-
-        optimizer = PromptOptimizer(client, tracker, metric_fn=score_fn)
-        original = "Original system prompt for test agent"
+        optimizer = PromptOptimizer(client, tracker, metric_fn=_async_metric_stub)
+        original = "Short"
         agent = Agent(name="TestAgent", role="test", system_prompt=original)
         result = await optimizer.compile(agent, n_candidates=1, min_samples=5)
-        assert result.improved, "Expected optimizer to find an improvement"
+        assert result.improved
         assert original not in agent.system_prompt
         assert agent.system_prompt == new_prompt_text
 
@@ -371,10 +415,10 @@ class TestPromptOptimizerCompile:
         tracker = _make_tracker_with_data("TestAgent", successes=7, failures=5)
         client = AsyncMock()
         client.chat.completions.create = AsyncMock(
-            return_value=_mock_llm_response("New prompt addressing failed_task errors")
+            return_value=_mock_llm_response("New prompt addressing failed_task errors -- long enough to outscore")
         )
-        optimizer = PromptOptimizer(client, tracker)
-        original = "Original prompt to preserve for rollback"
+        optimizer = PromptOptimizer(client, tracker, metric_fn=_async_metric_stub)
+        original = "Short"
         agent = Agent(name="TestAgent", role="test", system_prompt=original)
         result = await optimizer.compile(agent, n_candidates=1, min_samples=5)
         assert result.old_prompt == original
@@ -385,12 +429,15 @@ class TestPromptOptimizerCompile:
         tracker = _make_tracker_with_data("TestAgent", successes=10, failures=0)
         client = AsyncMock()
         client.chat.completions.create = AsyncMock(
-            return_value=_mock_llm_response("Generic text")
+            return_value=_mock_llm_response("Short")
         )
-        optimizer = PromptOptimizer(client, tracker)
+
+        async def always_low(candidate_prompt, agent_name):
+            return 0.1
+
+        optimizer = PromptOptimizer(client, tracker, metric_fn=always_low)
         original = "Original prompt"
         agent = Agent(name="TestAgent", role="test", system_prompt=original)
         result = await optimizer.compile(agent, n_candidates=2, min_samples=5)
         assert not result.improved
         assert agent.system_prompt == original
-
