@@ -259,3 +259,46 @@ class TestMockToolFunction:
         result = json.loads(await fn())
         assert result["success"] is True
         assert "results" in result
+
+
+class TestCommandToolShellHardening:
+    """Tests for shell execution hardening in command_tool."""
+
+    def test_needs_shell_detects_operators(self):
+        from forge.runtime.integrations.command_tool import _needs_shell
+        assert _needs_shell("ls | grep foo") is True
+        assert _needs_shell("echo hello && echo world") is True
+        assert _needs_shell("cat file > output.txt") is True
+        assert _needs_shell("echo $(whoami)") is True
+        assert _needs_shell("cmd1 || cmd2") is True
+        assert _needs_shell("cmd1 ; cmd2") is True
+
+    def test_needs_shell_false_for_simple_commands(self):
+        from forge.runtime.integrations.command_tool import _needs_shell
+        assert _needs_shell("python test.py") is False
+        assert _needs_shell("pip install flask") is False
+        assert _needs_shell("git status") is False
+
+    @pytest.mark.asyncio
+    async def test_simple_command_uses_shell_false(self):
+        """Simple command without shell operators should use shell=False."""
+        from forge.runtime.integrations.command_tool import run_command
+        with patch("forge.runtime.integrations.command_tool.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            await run_command("python test.py", workdir=".")
+            call_kwargs = mock_run.call_args
+            assert call_kwargs[1]["shell"] is False
+            # First arg should be a list (shlex.split result)
+            assert isinstance(call_kwargs[0][0], list)
+
+    @pytest.mark.asyncio
+    async def test_piped_command_uses_shell_true(self):
+        """Command with pipe operator should use shell=True."""
+        from forge.runtime.integrations.command_tool import run_command
+        with patch("forge.runtime.integrations.command_tool.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            await run_command("pytest | tee output.log", workdir=".")
+            call_kwargs = mock_run.call_args
+            assert call_kwargs[1]["shell"] is True
+            # First arg should be a string when shell=True
+            assert isinstance(call_kwargs[0][0], str)

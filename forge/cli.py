@@ -459,7 +459,7 @@ RUN if [ -d "forge" ]; then cd /app && pip install --no-cache-dir -e . 2>/dev/nu
 EXPOSE {port}
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\
-    CMD curl -f http://localhost:{port}/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:{port}/health')" || exit 1
 
 CMD ["uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "{port}"]
 """

@@ -17,6 +17,12 @@ from forge.runtime.tools import Tool, ToolParameter
 
 logger = logging.getLogger(__name__)
 
+
+def _needs_shell(command: str) -> bool:
+    """Check if command requires shell interpretation."""
+    shell_operators = ['|', '&&', '||', '>', '<', '>>', '<<', ';', '`', '$(']
+    return any(op in command for op in shell_operators)
+
 # Commands that are ALWAYS blocked (security)
 BLOCKED_PATTERNS = [
     "rm -rf /",
@@ -73,7 +79,7 @@ async def run_command(
     command: str,
     workdir: str = ".",
     timeout: int = 30,
-    shell: bool = True,
+    shell: bool | None = None,
     background: bool = False,
 ) -> str:
     """
@@ -97,18 +103,21 @@ async def run_command(
     work_path = Path(workdir).resolve()
     work_path.mkdir(parents=True, exist_ok=True)
 
+    use_shell = shell if shell is not None else _needs_shell(command)
+
     if background:
         try:
             import subprocess as sp
+            bg_cmd = command if use_shell else shlex.split(command)
             if platform.system() == "Windows":
                 process = sp.Popen(
-                    command, shell=True, cwd=str(work_path),
+                    bg_cmd, shell=use_shell, cwd=str(work_path),
                     stdout=sp.DEVNULL, stderr=sp.DEVNULL,
                     creationflags=sp.CREATE_NEW_PROCESS_GROUP,
                 )
             else:
                 process = sp.Popen(
-                    command, shell=True, cwd=str(work_path),
+                    bg_cmd, shell=use_shell, cwd=str(work_path),
                     stdout=sp.DEVNULL, stderr=sp.DEVNULL,
                     start_new_session=True,
                 )
@@ -126,12 +135,13 @@ async def run_command(
 
     try:
         # Run the command
+        cmd = command if use_shell else shlex.split(command)
         if platform.system() == "Windows":
             process = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    command,
-                    shell=True,
+                    cmd,
+                    shell=use_shell,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -143,8 +153,8 @@ async def run_command(
             process = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    command if shell else shlex.split(command),
-                    shell=shell,
+                    cmd,
+                    shell=use_shell,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
