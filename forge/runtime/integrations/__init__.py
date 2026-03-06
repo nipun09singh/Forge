@@ -1,5 +1,9 @@
 """Built-in tool integrations — real working tools for Forge agencies."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from forge.runtime.integrations.http_tool import create_http_tool
 from forge.runtime.integrations.email_tool import create_email_tool
 from forge.runtime.integrations.sql_tool import create_sql_tool
@@ -13,6 +17,9 @@ from forge.runtime.integrations.twilio_tool import create_twilio_tool
 from forge.runtime.integrations.stripe_tool import create_stripe_tool
 from forge.runtime.integrations.calendar_tool import create_calendar_tool
 from forge.runtime.tools import Tool
+
+if TYPE_CHECKING:
+    from forge.runtime.policies import SecurityPolicy
 
 
 class BuiltinToolkit:
@@ -28,17 +35,18 @@ class BuiltinToolkit:
         sandbox_dir: str = "./data",
         db_path: str = "./data/agency.db",
         smtp_host: str | None = None,
+        policy: "SecurityPolicy | None" = None,
     ) -> list[Tool]:
         """Get all built-in tools."""
         tools = [
             create_http_tool(),
             create_file_tool(sandbox_dir=sandbox_dir),
-            create_sql_tool(db_path=db_path),
+            create_sql_tool(db_path=db_path, policy=policy),
         ]
         if smtp_host:
             tools.append(create_email_tool(smtp_host=smtp_host))
         tools.append(create_webhook_tool())
-        tools.append(create_command_tool())
+        tools.append(create_command_tool(policy=policy))
         tools.append(create_git_tool())
         tools.append(create_browser_tool())
         tools.append(create_search_tool())
@@ -52,6 +60,7 @@ class BuiltinToolkit:
         sandbox_dir: str = "./workspace",
         db_path: str = "./data/agency.db",
         role: str | None = None,
+        policy: "SecurityPolicy | None" = None,
     ) -> list:
         """Get primitive tools, optionally filtered by agent role.
 
@@ -82,7 +91,7 @@ class BuiltinToolkit:
         # Only include command_tool for privileged roles (or when no role specified)
         _command_roles = {"developer", "admin"}
         if role is None or role.strip().lower() in _command_roles:
-            tools.insert(1, create_command_tool())
+            tools.insert(1, create_command_tool(policy=policy))
 
         return tools
 

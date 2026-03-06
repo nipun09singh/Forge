@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from forge.runtime.tools import Tool, ToolParameter
+from forge.runtime.guardrails import SqlSanitizer
+
+if TYPE_CHECKING:
+    from forge.runtime.policies import SecurityPolicy
+
+logger = logging.getLogger(__name__)
 
 _DB_PATH = "./data/agency.db"
+_sanitizer = SqlSanitizer()
 
 
 async def query_database(query: str, db_path: str = "") -> str:
@@ -22,24 +30,29 @@ async def query_database(query: str, db_path: str = "") -> str:
         if abs_path.lower().startswith(prefix.lower()):
             return json.dumps({"error": f"Database path in system directory is blocked: {prefix}"})
 
-    # Safety: block destructive and dangerous operations
-    query_upper = query.strip().upper()
-    blocked_prefixes_sql = ("DROP", "TRUNCATE", "ALTER", "ATTACH", "DETACH")
-    if any(query_upper.startswith(cmd) for cmd in blocked_prefixes_sql):
-        return json.dumps({"error": "Destructive operations (DROP, TRUNCATE, ALTER, ATTACH, DETACH) are blocked for safety."})
-    # Block DELETE without WHERE clause (mass deletion)
-    if query_upper.startswith("DELETE") and "WHERE" not in query_upper:
-        return json.dumps({"error": "DELETE without WHERE clause is blocked for safety. Use WHERE to specify rows."})
-    # Block dangerous SQLite functions
-    if "LOAD_EXTENSION" in query_upper:
-        return json.dumps({"error": "load_extension is blocked for security."})
+    # --- SQL validation via SqlSanitizer (defense-in-depth) ---
+    cleaned = _sanitizer.sanitize(query)
+
+    violation = _sanitizer.validate(cleaned)
+    if violation is not None:
+        if violation.severity == "block":
+            return json.dumps({"error": violation.description})
+        logger.warning("SQL guardrail warning: %s", violation.description)
+
+    violation = _sanitizer.is_parameterized(cleaned)
+    if violation is not None:
+        if violation.severity == "block":
+            return json.dumps({"error": violation.description})
+        logger.warning("SQL guardrail warning: %s", violation.description)
+
+    query_upper = cleaned.upper()
 
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         conn = sqlite3.connect(path)
         conn.execute("PRAGMA trusted_schema = OFF")
         conn.row_factory = sqlite3.Row
-        cursor = conn.execute(query)
+        cursor = conn.execute(cleaned)
 
         if query_upper.startswith("SELECT") or query_upper.startswith("WITH") or query_upper.startswith("PRAGMA"):
             rows = cursor.fetchall()
@@ -55,10 +68,13 @@ async def query_database(query: str, db_path: str = "") -> str:
         return json.dumps({"error": str(e)})
 
 
-def create_sql_tool(db_path: str = "") -> Tool:
+def create_sql_tool(db_path: str = "", policy: "SecurityPolicy | None" = None) -> Tool:
     if db_path:
         global _DB_PATH
         _DB_PATH = db_path
+    if policy is not None:
+        global _sanitizer
+        _sanitizer = SqlSanitizer(policy=policy)
     return Tool(
         name="query_database",
         description="Execute SQL queries against a SQLite database. Supports SELECT, INSERT, UPDATE, DELETE, CREATE TABLE. DROP/TRUNCATE/ALTER are blocked.",

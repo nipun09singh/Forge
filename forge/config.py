@@ -161,3 +161,9 @@ def reset_config() -> None:
     """Reset config (forces re-read from env on next get_config call)."""
     global _config
     _config = None
+
+
+# Re-export SecurityPolicy for convenience
+from forge.runtime.policies import SecurityPolicy  # noqa: E402, F401
+
+__all__ = ["ForgeConfig", "SecurityPolicy", "get_config", "reset_config"]

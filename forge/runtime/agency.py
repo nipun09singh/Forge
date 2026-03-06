@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from openai import AsyncOpenAI
+
+if TYPE_CHECKING:
+    from forge.runtime.policies import SecurityPolicy
 
 from forge.runtime.agent import Agent, TaskResult
 from forge.runtime.memory import SharedMemory
@@ -47,11 +50,13 @@ class Agency:
         api_key: str | None = None,
         base_url: str | None = None,
         execution_strategy: ExecutionStrategy = ExecutionStrategy.ORCHESTRATOR,
+        security_policy: "SecurityPolicy | None" = None,
     ):
         self.name = name
         self.description = description
         self.model = model
         self.strategy = execution_strategy
+        self.security_policy = security_policy
         self.memory = SharedMemory()
         self.router = Router()
         self.teams: dict[str, Team] = {}
@@ -79,6 +84,8 @@ class Agency:
             self._quality_gate = None
 
         self.max_concurrent_tasks: int = 0
+        self._concurrency_semaphore: asyncio.Semaphore | None = None
+        self._active_tasks: int = 0
         self._checkpoint_store: CheckpointStore | None = None
         self._task_count: int = 0
         self._evolution_interval: int = 10
@@ -181,7 +188,15 @@ class Agency:
         If use_planner=True, decomposes the task into a plan first.
         If team_name is given, delegates to that team.
         Otherwise, uses the first team or a standalone agent.
+
+        Respects concurrency limits set via set_concurrency_limit().
         """
+        if self._concurrency_semaphore is not None:
+            async with self._concurrency_semaphore:
+                return await self._execute_inner(task, team_name, context, use_planner)
+        return await self._execute_inner(task, team_name, context, use_planner)
+
+    async def _execute_inner(self, task: str, team_name: str | None = None, context: dict[str, Any] | None = None, use_planner: bool = False) -> TaskResult:
         logger.info(f"Agency '{self.name}' executing: {task[:80]}...")
 
         if not task or not isinstance(task, str) or not task.strip():
@@ -191,44 +206,48 @@ class Agency:
             available = list(self.teams.keys())
             return TaskResult(success=False, output=f"Team '{team_name}' not found. Available teams: {available}")
 
-        # Route through planner for complex multi-step tasks
-        if use_planner and self.planner:
-            plan_result = await self.planner.plan_and_execute(task, context)
-            result = TaskResult(
-                success=plan_result["status"] == "completed",
-                output=plan_result.get("summary", "Plan execution finished."),
-                data=plan_result,
-            )
-        elif team_name and team_name in self.teams:
-            result = await self.teams[team_name].execute(task, context)
-        elif self.teams:
-            first_team = next(iter(self.teams.values()))
-            result = await first_team.execute(task, context)
-        elif self._standalone_agents:
-            first_agent = next(iter(self._standalone_agents.values()))
-            result = await first_agent.execute(task, context)
-        else:
-            return TaskResult(success=False, output="No agents or teams available.")
+        self._active_tasks += 1
+        try:
+            # Route through planner for complex multi-step tasks
+            if use_planner and self.planner:
+                plan_result = await self.planner.plan_and_execute(task, context)
+                result = TaskResult(
+                    success=plan_result["status"] == "completed",
+                    output=plan_result.get("summary", "Plan execution finished."),
+                    data=plan_result,
+                )
+            elif team_name and team_name in self.teams:
+                result = await self.teams[team_name].execute(task, context)
+            elif self.teams:
+                first_team = next(iter(self.teams.values()))
+                result = await first_team.execute(task, context)
+            elif self._standalone_agents:
+                first_agent = next(iter(self._standalone_agents.values()))
+                result = await first_agent.execute(task, context)
+            else:
+                return TaskResult(success=False, output="No agents or teams available.")
 
-        # Trigger self-improvement cycle every N tasks
-        self._task_count += 1
-        if self._task_count % self._evolution_interval == 0 and self._performance_tracker:
-            try:
-                # Collect all agents across teams for evolution
-                all_agents: dict[str, Any] = {}
-                for team in self.teams.values():
-                    if team.lead:
-                        all_agents[team.lead.name] = team.lead
-                    for agent in team.agents:
-                        all_agents[agent.name] = agent
-                for name, agent in self._standalone_agents.items():
-                    all_agents[name] = agent
-                await self.self_evolution.run_evolution_cycle(agents=all_agents)
-                await self.agent_spawner.check_and_spawn(self)
-            except Exception as e:
-                logger.debug(f"Self-improvement cycle skipped: {e}")
+            # Trigger self-improvement cycle every N tasks
+            self._task_count += 1
+            if self._task_count % self._evolution_interval == 0 and self._performance_tracker:
+                try:
+                    # Collect all agents across teams for evolution
+                    all_agents: dict[str, Any] = {}
+                    for team in self.teams.values():
+                        if team.lead:
+                            all_agents[team.lead.name] = team.lead
+                        for agent in team.agents:
+                            all_agents[agent.name] = agent
+                    for name, agent in self._standalone_agents.items():
+                        all_agents[name] = agent
+                    await self.self_evolution.run_evolution_cycle(agents=all_agents)
+                    await self.agent_spawner.check_and_spawn(self)
+                except Exception as e:
+                    logger.debug(f"Self-improvement cycle skipped: {e}")
 
-        return result
+            return result
+        finally:
+            self._active_tasks -= 1
 
     async def execute_parallel(self, tasks: list[dict[str, Any]]) -> list[TaskResult]:
         """Execute multiple tasks in parallel across teams."""
@@ -402,8 +421,25 @@ class Agency:
         }
 
     def set_concurrency_limit(self, max_tasks: int) -> None:
-        """Set maximum concurrent task executions."""
+        """Set maximum concurrent task executions.
+
+        Args:
+            max_tasks: Maximum number of tasks that can execute concurrently.
+                       0 means unlimited (no semaphore enforced).
+        """
         self.max_concurrent_tasks = max_tasks
+        if max_tasks > 0:
+            self._concurrency_semaphore = asyncio.Semaphore(max_tasks)
+        else:
+            self._concurrency_semaphore = None
+
+    def get_concurrency_status(self) -> dict[str, Any]:
+        """Return current concurrency information."""
+        return {
+            "active_tasks": self._active_tasks,
+            "max_concurrent_tasks": self.max_concurrent_tasks,
+            "limited": self.max_concurrent_tasks > 0,
+        }
 
     def __repr__(self) -> str:
         total = sum(len(t.agents) + (1 if t.lead else 0) for t in self.teams.values()) + len(self._standalone_agents)
