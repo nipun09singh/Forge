@@ -486,6 +486,17 @@ class TestToolBlocking:
         allowed, _ = e.is_tool_allowed("query_database")
         assert allowed is False
 
+
+class TestBugFixResearchInstruction:
+    """BUG 3: RESEARCH phase instruction must mention .json/.md only."""
+
+    def test_research_instruction_mentions_json_md_only(self):
+        e = PhaseGateEnforcer("/tmp/test")
+        instruction = e.get_phase_instruction()
+        assert ".json" in instruction
+        assert ".md" in instruction
+        assert "only create" in instruction.lower() or "only create" in instruction
+
     def test_browse_web_allowed_in_research(self):
         e = PhaseGateEnforcer("/tmp/test")
         allowed, _ = e.is_tool_allowed("browse_web")

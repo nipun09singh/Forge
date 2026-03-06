@@ -19,13 +19,12 @@ from forge.runtime.human import HumanApprovalGate, ApprovalRequest, ApprovalResu
 from forge.runtime.guardrails import GuardrailsEngine
 from forge.runtime.model_router import ModelRouter
 from forge.runtime.primitives import (
-    PlannerBase, SimplePlanner, ExecutorBase, ReActExecutor,
     CriticBase, ScoredCritic, EscalationPolicy,
 )
 from forge.runtime.primitives.critics import CriticVerdict
 from forge.runtime.knowledge import DomainKnowledge
 from forge.runtime.structured_outputs import AgentResponse, TaskStatus, parse_agent_response
-from forge.runtime.confidence import ConfidenceScorer, ConfidenceScore
+from forge.runtime.confidence import ConfidenceScorer, ConfidenceScore, ConfidenceLevel
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +83,6 @@ class Agent:
         max_cost_usd: float = 0.0,  # 0 = unlimited
         max_conversation_history: int = 50,
         # Composable primitives (optional — defaults match current behavior)
-        planner: PlannerBase | None = None,
-        executor: ExecutorBase | None = None,
         critic: CriticBase | None = None,
         escalation_policy: EscalationPolicy | None = None,
         domain_knowledge: DomainKnowledge | None = None,
@@ -123,8 +120,6 @@ class Agent:
         self._max_concurrent_tools = max_concurrent_tools
 
         # Composable primitives
-        self._planner = planner or SimplePlanner()
-        self._executor = executor or ReActExecutor(max_iterations=max_iterations)
         self._critic = critic
         self._escalation_policy = escalation_policy or EscalationPolicy()
         self.domain_knowledge = domain_knowledge
@@ -207,6 +202,15 @@ class Agent:
             knowledge_text = self.domain_knowledge.to_prompt_injection()
             if knowledge_text:
                 self.conversation[0]["content"] += f"\n\n{knowledge_text}"
+
+        # Inject relevant memory context
+        if self.memory:
+            context_summary = self.memory.get_context_summary(max_entries=5)
+            if context_summary:
+                self.conversation.append({
+                    "role": "system",
+                    "content": f"[Memory Context]: {context_summary}"
+                })
 
         try:
             for iteration in range(self.max_iterations):
@@ -320,6 +324,11 @@ class Agent:
                 output_confidence = self._confidence_scorer.score_output(
                     final_output, task, quality_score=quality_score,
                 )
+
+                if output_confidence.level == ConfidenceLevel.LOW:
+                    # Don't accept LOW confidence output — nudge to improve
+                    self.conversation.append({"role": "user", "content": f"Your response has low confidence ({output_confidence.score:.2f}): {output_confidence.reasoning}. Please improve your answer or use tools to verify."})
+                    continue
 
                 return TaskResult(
                     success=True,
@@ -455,11 +464,11 @@ class Agent:
 
         # Confidence-gated autonomy check
         confidence = self._confidence_scorer.score_tool_call(fn_name, args)
-        if confidence.level == "low":
+        if confidence.level == ConfidenceLevel.LOW:
             logger.warning(
                 f"LOW confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
             )
-            if self._approval_gate and not self.require_human_approval:
+            if self._approval_gate:
                 approval = await self._approval_gate.approve(ApprovalRequest(
                     agent_name=self.name,
                     action_description=f"Low-confidence tool call '{fn_name}': {confidence.reasoning}",
@@ -468,8 +477,10 @@ class Agent:
                     context={"tool": fn_name, "args": args, "confidence": confidence.score},
                 ))
                 if approval.decision == ApprovalDecision.REJECTED:
-                    return {"id": tc["id"], "output": f"Tool call rejected (low confidence): {approval.feedback}"}
-        elif confidence.level == "medium":
+                    return {"id": tc["id"], "output": "Tool blocked: low confidence, human denied"}
+            else:
+                return {"id": tc["id"], "output": f"Tool blocked: low confidence ({confidence.score:.2f}): {confidence.reasoning}"}
+        elif confidence.level == ConfidenceLevel.MEDIUM:
             logger.info(
                 f"MEDIUM confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
             )
@@ -620,8 +631,6 @@ class Agent:
     def get_primitive_config(self) -> dict[str, str]:
         """Get the current primitive configuration of this agent."""
         return {
-            "planner": repr(self._planner),
-            "executor": repr(self._executor),
             "critic": repr(self._critic) if self._critic else "None",
             "escalation": repr(self._escalation_policy),
             "knowledge": repr(self.domain_knowledge) if self.domain_knowledge else "None",

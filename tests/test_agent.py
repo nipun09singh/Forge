@@ -71,3 +71,52 @@ class TestMessage:
         assert m.role == "user"
         assert m.content == "hello"
         assert m.sender_id is None
+
+
+class TestBugFixesAgent:
+    """Tests for fresh-eyes audit bug fixes in Agent."""
+
+    def test_no_executor_or_planner_attributes(self, sample_agent):
+        """BUG 4: Agent should not have _executor or _planner attributes."""
+        assert not hasattr(sample_agent, "_executor")
+        assert not hasattr(sample_agent, "_planner")
+
+    def test_get_primitive_config_no_planner_executor(self, sample_agent):
+        """BUG 4: get_primitive_config should not include planner or executor."""
+        config = sample_agent.get_primitive_config()
+        assert "planner" not in config
+        assert "executor" not in config
+
+    @pytest.mark.asyncio
+    async def test_execute_injects_memory_context(self, sample_agent_with_llm):
+        """BUG 5: execute() should inject memory context when memory has data."""
+        from forge.runtime.memory import SharedMemory
+        mem = SharedMemory()
+        mem.store("project:status", "In progress", author="lead")
+        mem.store("research:api", "Use REST v2", author="researcher")
+        sample_agent_with_llm.set_memory(mem)
+
+        await sample_agent_with_llm.execute("test task")
+
+        # Check that a memory context system message was injected
+        memory_messages = [
+            m for m in sample_agent_with_llm.conversation
+            if m.get("role") == "system" and "[Memory Context]" in m.get("content", "")
+        ]
+        assert len(memory_messages) >= 1
+        assert "project:status" in memory_messages[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_execute_no_memory_injection_when_empty(self, sample_agent_with_llm):
+        """BUG 5: execute() should not inject memory context when memory is empty."""
+        from forge.runtime.memory import SharedMemory
+        mem = SharedMemory()
+        sample_agent_with_llm.set_memory(mem)
+
+        await sample_agent_with_llm.execute("test task")
+
+        memory_messages = [
+            m for m in sample_agent_with_llm.conversation
+            if m.get("role") == "system" and "[Memory Context]" in m.get("content", "")
+        ]
+        assert len(memory_messages) == 0

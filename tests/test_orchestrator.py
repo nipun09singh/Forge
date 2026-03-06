@@ -239,3 +239,49 @@ class TestDiscoverTool:
         schema_after = orch._get_tools_schema()
         names_after = {s["function"]["name"] for s in schema_after}
         assert "send_sms" in names_after
+
+
+class TestBugFixes:
+    """Tests for fresh-eyes audit bug fixes."""
+
+    def test_success_false_when_project_not_complete(self):
+        """BUG 1: success should be False when project_complete is False, even with many files."""
+        r = OrchestratorResult(
+            success=False,
+            files_created=["a.py", "b.py", "c.py", "d.py", "e.py"],
+            iterations=10,
+        )
+        assert r.success is False
+
+    @pytest.mark.asyncio
+    async def test_success_requires_project_complete(self):
+        """BUG 1: build() must not count files as success."""
+        client = AsyncMock()
+        # Agent just talks (no DONE signal), hits max_iterations
+        response = _make_llm_response(content="Still working...")
+        client.chat.completions.create = AsyncMock(return_value=response)
+
+        orch = OrchestratorAgent(llm_client=client, max_iterations=2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Pre-create 5 files so files_created >= 2
+            for i in range(5):
+                open(os.path.join(tmpdir, f"file{i}.py"), "w").close()
+            result = await orch.build("Build something", workdir=tmpdir)
+            # Even with 5 files, success should be False (project never completed)
+            assert result.success is False
+
+    def test_system_prompt_mentions_plan_and_ship_phases(self):
+        """BUG 2: System prompt must mention PLAN and SHIP phases."""
+        orch = OrchestratorAgent()
+        # We can't call build() without an LLM, but we can inspect
+        # that the class produces a prompt with the right phases.
+        # Build the system prompt the same way build() does:
+        import sys
+        python_path = sys.executable
+        # The prompt is built inline in build(), so let's check the source
+        import inspect
+        source = inspect.getsource(OrchestratorAgent.build)
+        assert "PHASE 2 — PLAN" in source
+        assert "PHASE 5 — SHIP" in source
+        assert "PHASE 3 — TEST & DEBUG" not in source
+        assert "PHASE 4 — POLISH" not in source

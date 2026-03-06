@@ -31,7 +31,7 @@ from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS, Eve
 from forge.runtime.phase_gates import PhaseGateEnforcer
 from forge.runtime.structured_outputs import parse_completion_signal
 from forge.runtime.token_manager import TokenCounter, SemanticBudget
-from forge.runtime.confidence import ConfidenceScorer
+from forge.runtime.confidence import ConfidenceScorer, ConfidenceLevel
 
 logger = logging.getLogger(__name__)
 
@@ -238,33 +238,34 @@ class OrchestratorAgent:
             "═══ HOW YOU WORK ═══\n\n"
             
             "PHASE 1 — RESEARCH:\n"
-            "Before writing ANY code, research what you need:\n"
-            "- Use browse_web to read API documentation, SDK guides, and best practices\n"
-            "- If you need Twilio → browse their docs. Need Stripe → browse their docs.\n"
+            "Use web_search and browse_web to research the domain, APIs, and best practices.\n"
+            "- Read API documentation for any services needed\n"
             "- Understand the domain: what does this business actually need?\n"
-            "- Plan the architecture before writing code.\n\n"
+            "- Save research artifacts as .json or .md files only.\n\n"
             
-            "PHASE 2 — BUILD:\n"
-            "Create the complete project file by file:\n"
+            "PHASE 2 — PLAN:\n"
+            "Create a SPEC.md with architecture, file structure, dependencies, and acceptance criteria.\n"
+            "- Architecture: what components, how they connect\n"
+            "- File structure: list every file you'll create\n"
+            "- Dependencies: what packages/APIs are needed\n"
+            "- Acceptance criteria: how to verify it works\n\n"
+            
+            "PHASE 3 — BUILD:\n"
+            "Create all project files using read_write_file.\n"
             "- Use read_write_file to create every source file\n"
             f"- Use run_command to install packages: '{python_path} -m pip install <package>'\n"
             "- Create proper project structure (src/, tests/, templates/, etc.)\n"
-            "- Include: source code, tests, config, README, requirements.txt\n"
-            "- For web UIs: create HTML/CSS/JS files with modern, clean design\n"
-            "- For APIs: create FastAPI/Flask endpoints with proper routing\n"
-            "- For integrations: install the SDK, read the docs, implement properly\n\n"
+            "- Include: source code, tests, config, README, requirements.txt\n\n"
             
-            "PHASE 3 — TEST & DEBUG:\n"
-            f"- Run tests: '{python_path} -m pytest tests/' or '{python_path} -m unittest discover'\n"
+            "PHASE 4 — VERIFY:\n"
+            f"Run tests with pytest ('{python_path} -m pytest tests/'), fix failures,\n"
+            "ensure README and requirements.txt exist.\n"
             "- If tests fail: READ the error output carefully, FIX the code, re-run\n"
-            f"- Run the app: '{python_path} main.py' or '{python_path} -m uvicorn app:app'\n"
             "- Keep fixing until everything works\n\n"
             
-            "PHASE 4 — POLISH:\n"
-            "- Add error handling and input validation\n"
-            "- Add docstrings and type hints\n"
-            "- Create comprehensive README with setup instructions\n"
-            "- Create Dockerfile for deployment\n"
+            "PHASE 5 — SHIP:\n"
+            "Initialize git repo, commit all files.\n"
+            "- git init, git add, git commit\n"
             "- Ensure code is production-quality, not a prototype\n\n"
             
             "═══ RULES ═══\n"
@@ -422,7 +423,7 @@ class OrchestratorAgent:
                         if tool:
                             # Confidence-gated autonomy check
                             confidence = self._confidence_scorer.score_tool_call(fn_name, args)
-                            if confidence.level == "low":
+                            if confidence.level == ConfidenceLevel.LOW:
                                 logger.warning(
                                     f"LOW confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
                                 )
@@ -434,10 +435,23 @@ class OrchestratorAgent:
                                         level="warning",
                                         trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
                                     ))
-                            elif confidence.level == "medium":
+                                # LOW confidence: inject warning and ask LLM to confirm before executing
+                                conversation.append({
+                                    "role": "tool",
+                                    "content": json.dumps({
+                                        "warning": f"LOW CONFIDENCE ({confidence.score:.2f}): {confidence.reasoning}",
+                                        "action_required": "This tool call has low confidence. The tool was NOT executed. Please reconsider or provide more context before retrying.",
+                                        "tool_name": fn_name,
+                                        "blocked": True,
+                                    }),
+                                    "tool_call_id": tc.id,
+                                })
+                                continue  # Skip execution — let LLM reconsider
+                            elif confidence.level == ConfidenceLevel.MEDIUM:
                                 logger.info(
-                                    f"MEDIUM confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
+                                    f"  \u26a0\ufe0f Medium confidence ({confidence.score:.2f}): {confidence.reasoning}"
                                 )
+                                # Proceed with execution
 
                             try:
                                 # Set workdir for command/file tools
@@ -535,6 +549,14 @@ class OrchestratorAgent:
                 # Check for completion signal (structured JSON or string patterns)
                 completion = parse_completion_signal(text_output)
                 if completion and len(files_created) >= 1:
+                    # Score output confidence before accepting completion
+                    output_confidence = self._confidence_scorer.score_output(text_output, task)
+                    if output_confidence.level == ConfidenceLevel.LOW:
+                        # Don't accept LOW confidence completion — nudge to improve
+                        conversation.append({"role": "user", "content": f"Your response has low confidence ({output_confidence.score:.2f}): {output_confidence.reasoning}. Please improve your answer or use tools to verify."})
+                        semantic_budget.tag_message(conversation[-1], "conversation")
+                        continue
+
                     # Enforce phase gates before accepting completion
                     can_complete, blockers = phase_enforcer.can_complete()
                     if not can_complete:
@@ -597,7 +619,7 @@ class OrchestratorAgent:
             summary_lines.append(f"  {f}")
 
         result = OrchestratorResult(
-            success=project_complete or len(files_created) >= 2,
+            success=project_complete,
             project_dir=str(project_dir),
             files_created=sorted(files_created),
             iterations=iterations,

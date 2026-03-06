@@ -249,6 +249,7 @@ class PhaseGateEnforcer:
                 "- Read API documentation for any services needed\n"
                 "- Understand best practices for this domain\n"
                 "- Study similar projects and their architecture\n"
+                "During RESEARCH, only create .json or .md files for your research notes.\n"
                 "Requirements: >=3 web searches, >=2 sites browsed, save research artifact (JSON).\n"
                 "You cannot proceed to PLAN until you've done research.\n"
             )
