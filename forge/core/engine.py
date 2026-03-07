@@ -19,6 +19,24 @@ from forge.core.critic import BlueprintCritic, RefinementLoop
 from forge.core.quality import BlueprintEvaluator, QualityRubric, format_quality_report
 
 logger = logging.getLogger(__name__)
+
+# Minimum quality score required to proceed without --force
+MIN_QUALITY_SCORE = 0.75
+MIN_STRUCTURAL_SCORE = 0.5
+
+
+class QualityGateError(Exception):
+    """Raised when the blueprint quality score is below the minimum threshold."""
+
+    def __init__(self, score: float, threshold: float, reason: str = ""):
+        self.score = score
+        self.threshold = threshold
+        self.reason = reason
+        detail = reason or f"Quality score {score:.0%} is below minimum threshold {threshold:.0%}"
+        super().__init__(
+            f"{detail}. "
+            f"Use --force to generate anyway, or refine your domain description."
+        )
 console = Console()
 
 
@@ -73,6 +91,7 @@ class ForgeEngine:
         overwrite: bool = False,
         inject_archetypes_flag: bool = True,
         include_business_archetypes: bool = False,
+        force: bool = False,
     ) -> tuple[AgencyBlueprint, Path]:
         """
         Create a complete AI agency from a domain description.
@@ -135,6 +154,34 @@ class ForgeEngine:
             final_score = refinement_history[-1]["combined_score"] if refinement_history else 0
             progress.update(task, description=f"[green]✓ Quality verified ({iterations} iterations, score: {final_score:.0%})")
             self._emit_progress("refine", f"Quality verified ({iterations} iterations, score: {final_score:.0%})")
+
+            # Quality gate: reject low-quality blueprints unless --force is set
+            last_entry = refinement_history[-1] if refinement_history else {}
+            structural = last_entry.get("structural_score", 1.0)
+            zero_dims = last_entry.get("zero_dimensions", [])
+
+            gate_failure_reason = ""
+            if final_score < MIN_QUALITY_SCORE:
+                gate_failure_reason = (
+                    f"Quality score {final_score:.0%} is below minimum threshold "
+                    f"{MIN_QUALITY_SCORE:.0%}"
+                )
+            elif structural < MIN_STRUCTURAL_SCORE:
+                gate_failure_reason = (
+                    f"Structural score {structural:.0%} is below minimum "
+                    f"{MIN_STRUCTURAL_SCORE:.0%}"
+                )
+            elif zero_dims:
+                gate_failure_reason = (
+                    f"Critical dimensions scored 0.0: {', '.join(zero_dims)}"
+                )
+
+            if gate_failure_reason:
+                if not force:
+                    raise QualityGateError(final_score, MIN_QUALITY_SCORE, gate_failure_reason)
+                logger.warning(
+                    f"{gate_failure_reason}, but proceeding because --force was set."
+                )
 
             # Phase 4: Generate the agency project
             progress.update(task, description="Generating agency code...")

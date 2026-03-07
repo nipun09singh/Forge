@@ -141,8 +141,8 @@ class TestCreateAgencyErrorHandling:
         mock_blueprint.api_endpoints = []
         engine.analyzer.analyze = AsyncMock(side_effect=[RuntimeError("API error"), mock_blueprint])
 
-        engine.refinement_loop.refine = AsyncMock(return_value=(mock_blueprint, [{"combined_score": 0.9}]))
-        engine.refinement_loop._history = [{"combined_score": 0.9}]
+        engine.refinement_loop.refine = AsyncMock(return_value=(mock_blueprint, [{"combined_score": 0.9, "structural_score": 0.8, "zero_dimensions": []}]))
+        engine.refinement_loop._history = [{"combined_score": 0.9, "structural_score": 0.8, "zero_dimensions": []}]
         engine.generator.generate = MagicMock(return_value=Path("/tmp/output"))
 
         with patch.object(engine, "_package_runtime"), \
@@ -194,8 +194,8 @@ class TestCreateAgencyErrorHandling:
         mock_blueprint.workflows = []
         mock_blueprint.api_endpoints = []
         engine.analyzer.analyze = AsyncMock(return_value=mock_blueprint)
-        engine.refinement_loop.refine = AsyncMock(return_value=(mock_blueprint, [{"combined_score": 0.95}]))
-        engine.refinement_loop._history = [{"combined_score": 0.95}]
+        engine.refinement_loop.refine = AsyncMock(return_value=(mock_blueprint, [{"combined_score": 0.95, "structural_score": 0.85, "zero_dimensions": []}]))
+        engine.refinement_loop._history = [{"combined_score": 0.95, "structural_score": 0.85, "zero_dimensions": []}]
         engine.generator.generate = MagicMock(return_value=Path("/tmp/out"))
 
         with patch.object(engine, "_package_runtime"), \
@@ -274,9 +274,9 @@ class TestQualityGate:
         engine, mock_blueprint = self._make_engine_and_blueprint(mocks)
 
         engine.refinement_loop.refine = AsyncMock(
-            return_value=(mock_blueprint, [{"combined_score": 0.35}])
+            return_value=(mock_blueprint, [{"combined_score": 0.35, "structural_score": 0.4, "zero_dimensions": []}])
         )
-        engine.refinement_loop._history = [{"combined_score": 0.35}]
+        engine.refinement_loop._history = [{"combined_score": 0.35, "structural_score": 0.4, "zero_dimensions": []}]
 
         with patch("forge.core.engine.inject_archetypes", return_value=mock_blueprint):
             with pytest.raises(QualityGateError, match="below minimum threshold"):
@@ -294,9 +294,9 @@ class TestQualityGate:
         engine, mock_blueprint = self._make_engine_and_blueprint(mocks)
 
         engine.refinement_loop.refine = AsyncMock(
-            return_value=(mock_blueprint, [{"combined_score": 0.35}])
+            return_value=(mock_blueprint, [{"combined_score": 0.35, "structural_score": 0.4, "zero_dimensions": []}])
         )
-        engine.refinement_loop._history = [{"combined_score": 0.35}]
+        engine.refinement_loop._history = [{"combined_score": 0.35, "structural_score": 0.4, "zero_dimensions": []}]
 
         with patch.object(engine, "_package_runtime"), \
              patch.object(engine, "_print_summary"), \
@@ -321,9 +321,9 @@ class TestQualityGate:
         engine, mock_blueprint = self._make_engine_and_blueprint(mocks)
 
         engine.refinement_loop.refine = AsyncMock(
-            return_value=(mock_blueprint, [{"combined_score": 0.85}])
+            return_value=(mock_blueprint, [{"combined_score": 0.85, "structural_score": 0.75, "zero_dimensions": []}])
         )
-        engine.refinement_loop._history = [{"combined_score": 0.85}]
+        engine.refinement_loop._history = [{"combined_score": 0.85, "structural_score": 0.75, "zero_dimensions": []}]
 
         with patch.object(engine, "_package_runtime"), \
              patch.object(engine, "_print_summary"), \

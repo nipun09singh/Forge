@@ -276,6 +276,13 @@ class RefinementLoop:
                 + biz_critique.score * 0.40
             )
 
+            # Identify dimensions that scored 0.0 (completely missing)
+            zero_dims = [
+                ds.dimension.value
+                for ds in structural_score.dimension_scores
+                if ds.score == 0.0
+            ]
+
             # Record iteration
             iteration_record = {
                 "iteration": iteration,
@@ -283,6 +290,7 @@ class RefinementLoop:
                 "critic_score": critique.score,
                 "business_ambition_score": biz_critique.score,
                 "combined_score": round(combined_score, 3),
+                "zero_dimensions": zero_dims,
                 "issues_count": len(critique.issues) + len(biz_critique.issues),
                 "critical_issues": (
                     [i.description for i in critique.issues if i.severity == "critical"]
@@ -315,8 +323,12 @@ class RefinementLoop:
 
             previous_critique = critique
 
-        # Max iterations reached
-        logger.warning(f"Max iterations ({self.max_iterations}) reached. Returning best blueprint.")
+        # Max iterations reached — record final state so callers can inspect the score
+        final_record = self._history[-1] if self._history else {"combined_score": 0}
+        logger.warning(
+            f"Max iterations ({self.max_iterations}) reached. "
+            f"Final score: {final_record['combined_score']:.0%}. Returning best blueprint."
+        )
         return current_blueprint, self._history
 
     async def _auto_refine(
