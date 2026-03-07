@@ -202,7 +202,7 @@ def main():
 
     original_agents = len(blueprint.all_agents)
     original_teams = len(blueprint.teams)
-    blueprint = inject_archetypes(blueprint)
+    blueprint = inject_archetypes(blueprint, include_business_archetypes=True)
 
     check("Archetypes injected", len(blueprint.all_agents) > original_agents,
           f"Before: {original_agents}, After: {len(blueprint.all_agents)}")

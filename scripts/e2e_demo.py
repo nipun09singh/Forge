@@ -80,6 +80,9 @@ async def run_demo(verbose: bool = False) -> dict:
     # ─── Step 2: Verify integration tools ─────────────────────
     print_header("Step 2: Integration Tools (Mock Mode)")
 
+    # Enable mock mode so integration tools return mock data without real API keys
+    os.environ.setdefault("MOCK_MODE", "true")
+
     # Twilio SMS
     from forge.runtime.integrations.twilio_tool import create_twilio_tool
     sms_tool = create_twilio_tool()
@@ -178,7 +181,7 @@ async def run_demo(verbose: bool = False) -> dict:
     enforcer2.tick()
     # Now in TEST — attempt to spoof with echo
     enforcer2.record_command_output('echo "passed"', 'passed')
-    spoofed = not enforcer2._phases[Phase.TEST].tests_run
+    spoofed = not enforcer2._phases[Phase.VERIFY].tests_run
     print_result("echo 'passed' defeated", spoofed, "Anti-spoofing active" if spoofed else "SPOOFING WORKS!")
     results["tests"].append({"name": "anti_spoofing", "passed": spoofed})
     results["total"] += 1
