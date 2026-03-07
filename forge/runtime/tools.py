@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import json
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Awaitable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -127,3 +132,70 @@ class ToolRegistry:
     def get_openai_tools_schema(self) -> list[dict[str, Any]]:
         """Get all tools in OpenAI function calling format."""
         return [t.to_openai_schema() for t in self._tools.values()]
+
+
+def _import_dotted_path(dotted_path: str) -> Callable:
+    """Import a callable from a dotted path like 'myapp.refunds.process_refund'."""
+    module_path, _, attr_name = dotted_path.rpartition(".")
+    if not module_path:
+        raise ImportError(f"Invalid dotted path (no module): {dotted_path}")
+    module = importlib.import_module(module_path)
+    fn = getattr(module, attr_name)
+    if not callable(fn):
+        raise TypeError(f"{dotted_path} is not callable")
+    return fn
+
+
+class ToolExecutor:
+    """Executes tools with optional real backend overrides.
+
+    Allows registering real backend functions for tools at runtime,
+    either programmatically or from a JSON config file.  When ``execute``
+    is called, the registered backend (if any) takes precedence over the
+    tool's default ``run()`` method.
+    """
+
+    def __init__(self) -> None:
+        self._backends: dict[str, Callable] = {}
+
+    def register_backend(self, tool_name: str, fn: Callable) -> None:
+        """Register a real backend function for a tool."""
+        self._backends[tool_name] = fn
+
+    def load_backends_from_config(self, config_path: str) -> None:
+        """Load backend mappings from a JSON config file.
+
+        Config format::
+
+            {"process_refund": "myapp.refunds.process_refund", ...}
+        """
+        path = Path(config_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Backend config not found: {config_path}")
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for tool_name, dotted_path in data.items():
+            if tool_name.startswith("_"):
+                continue  # skip comment keys like "_comment"
+            try:
+                fn = _import_dotted_path(dotted_path)
+                self._backends[tool_name] = fn
+                logger.info("Loaded backend for tool '%s' from '%s'", tool_name, dotted_path)
+            except (ImportError, TypeError, AttributeError) as exc:
+                logger.warning(
+                    "Failed to load backend for tool '%s' from '%s': %s",
+                    tool_name, dotted_path, exc,
+                )
+
+    def has_backend(self, tool_name: str) -> bool:
+        """Check whether a real backend is registered for a tool."""
+        return tool_name in self._backends
+
+    async def execute(self, tool: Tool, **kwargs: Any) -> Any:
+        """Execute tool, using real backend if registered, otherwise default."""
+        if tool.name in self._backends:
+            fn = self._backends[tool.name]
+            if inspect.iscoroutinefunction(fn):
+                return await fn(**kwargs)
+            return fn(**kwargs)
+        return await tool.run(**kwargs)

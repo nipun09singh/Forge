@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from forge.runtime.tools import Tool, ToolRegistry
+from forge.runtime.tools import Tool, ToolRegistry, ToolExecutor
 from forge.runtime.memory import SharedMemory
 from forge.runtime.types import LLMClient, LLMResponse, ToolResult as ToolResultDict, TaskContext
 from forge.runtime.improvement import QualityGate, QualityVerdict, ReflectionEngine, PerformanceTracker, TaskMetric
@@ -131,6 +131,7 @@ class Agent:
         self._tool_access_policy = ToolAccessPolicy()
         self.allowed_tools = allowed_tools
         self.denied_tools = denied_tools
+        self.tool_executor: ToolExecutor | None = None
 
         if tools:
             for tool in tools:
@@ -705,6 +706,11 @@ class Agent:
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
+                if self.tool_executor and self.tool_executor.has_backend(tool_name):
+                    return await asyncio.wait_for(
+                        self.tool_executor.execute(tool, **args),
+                        timeout=self._tool_timeout_seconds,
+                    )
                 return await asyncio.wait_for(
                     tool.run(**args),
                     timeout=self._tool_timeout_seconds,

@@ -3,7 +3,7 @@
 from forge.runtime.agent import Agent, AgentStatus, Message, TaskResult
 from forge.runtime.agency import Agency
 from forge.runtime.team import Team
-from forge.runtime.tools import Tool, ToolParameter, ToolRegistry, tool
+from forge.runtime.tools import Tool, ToolParameter, ToolRegistry, ToolExecutor, tool
 from forge.runtime.memory import SharedMemory
 from forge.runtime.persistence import MemoryBackend, InMemoryBackend, SQLiteMemoryBackend
 from forge.runtime.router import Router
@@ -18,7 +18,7 @@ from forge.runtime.archetype_tools import get_archetype_tools, set_shared_infras
 from forge.runtime.model_router import ModelRouter
 from forge.runtime.scheduler import Scheduler, TaskSchedule
 from forge.runtime.workspace import Workspace, WorkspaceManager
-from forge.runtime.knowledge import DomainKnowledge, get_domain_knowledge
+from forge.runtime.knowledge import DomainKnowledge, get_domain_knowledge, KnowledgeStore, AgentKnowledgeBase
 from forge.runtime.build_loop import BuildLoop, BuildResult
 from forge.runtime.self_evolution import SelfEvolution, EvolutionRecord
 from forge.runtime.inbound import InboundProcessor, InboundItem, FileDropChannel, APIQueueChannel
@@ -37,6 +37,7 @@ __all__ = [
     "Tool",
     "ToolParameter",
     "ToolRegistry",
+    "ToolExecutor",
     "tool",
     "SharedMemory",
     "MemoryBackend",
@@ -86,6 +87,8 @@ __all__ = [
     "WorkspaceManager",
     "DomainKnowledge",
     "get_domain_knowledge",
+    "KnowledgeStore",
+    "AgentKnowledgeBase",
     "BuildLoop",
     "BuildResult",
     "AgentSpawner",

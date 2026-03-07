@@ -1,8 +1,12 @@
 """{{ agent_name }} — {{ title }}"""
 
+import logging
+
 from forge.runtime import Agent, Tool, ToolParameter
 from forge.runtime.integrations import BuiltinToolkit
 from forge.runtime.integrations.mock_backends import create_mock_tool_function
+
+_logger = logging.getLogger(__name__)
 
 # Load all built-in integration tools for delegation
 _builtin_tools = {t.name: t for t in BuiltinToolkit.all_tools()}
@@ -12,6 +16,23 @@ _builtin_tools = {t.name: t for t in BuiltinToolkit.all_tools()}
 # Try real integration first (forge.runtime.integrations), fall back to mock
 {{ tool.name }}_tool = _builtin_tools.get("{{ tool.name }}")
 if not {{ tool.name }}_tool:
+    {% if tool.backend_ref %}
+    # Real backend: {{ tool.backend_ref }}
+    try:
+        from {{ tool.backend_ref.rpartition('.')[0] }} import {{ tool.backend_ref.rpartition('.')[2] }} as _{{ tool.name }}_fn
+        _logger.info("Loaded real backend for {{ tool.name }}")
+    except ImportError:
+        _{{ tool.name }}_fn = create_mock_tool_function(
+            "{{ tool.name }}",
+            "{{ tool.description }}",
+            [
+                {% for param in tool.parameters %}
+                {"name": "{{ param['name'] }}", "type": "{{ param['type'] }}", "description": "{{ param['description'] }}", "required": {{ param.get('required', True) }}},
+                {% endfor %}
+            ],
+        )
+        _logger.warning("Real backend not available for {{ tool.name }}, using mock")
+    {% else %}
     # Mock-backed domain tool: returns realistic data via MockDataStore
     _{{ tool.name }}_fn = create_mock_tool_function(
         "{{ tool.name }}",
@@ -22,6 +43,7 @@ if not {{ tool.name }}_tool:
             {% endfor %}
         ],
     )
+    {% endif %}
     {{ tool.name }}_tool = Tool(
         name="{{ tool.name }}",
         description="{{ tool.description }}",

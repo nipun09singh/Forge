@@ -27,6 +27,7 @@ class ToolBlueprint(BaseModel):
     parameters: list[dict[str, Any]] = Field(default_factory=list, description="Parameter definitions")
     implementation_hint: str = Field(default="", description="Guidance for generating the implementation")
     is_async: bool = Field(default=True, description="Whether the tool is async")
+    backend_ref: str | None = Field(default=None, description="Dotted import path for real implementation, e.g. 'myapp.tools.process_refund'")
 
     class Config:
         json_schema_extra = {
@@ -98,6 +99,21 @@ class WorkflowBlueprint(BaseModel):
     description: str = Field(default="", description="What this workflow accomplishes")
     trigger: str = Field(default="manual", description="What triggers this workflow")
     steps: list[WorkflowStep] = Field(default_factory=list, description="Ordered steps")
+
+    def validate_dependencies(self) -> None:
+        """Validate that workflow steps have no circular dependencies.
+
+        Raises ``CyclicDependencyError`` if a cycle is found.
+        """
+        from forge.runtime.planner import CyclicDependencyError, PlanStep, TaskPlan
+
+        plan_steps = [
+            PlanStep(id=s.id, description=s.description, depends_on=list(s.depends_on))
+            for s in self.steps
+        ]
+        cycle = TaskPlan._detect_cycles(plan_steps)
+        if cycle:
+            raise CyclicDependencyError(cycle)
 
 
 class APIEndpoint(BaseModel):

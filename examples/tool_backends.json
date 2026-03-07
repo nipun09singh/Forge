@@ -1,0 +1,5 @@
+{
+    "_comment": "Map tool names to real backend implementations (dotted import paths). Keys starting with '_' are ignored.",
+    "process_refund": "myapp.refunds.process_refund",
+    "check_inventory": "myapp.inventory.check_stock"
+}
