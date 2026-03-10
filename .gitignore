@@ -57,3 +57,15 @@ inbox/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal strategy docs (not for public repo)
+AGENT_STRATEGY.md
+UNICORN_ARCHITECTURE.md
+docs/unicorn_playbook.md
+
+# Outdated docs (contradict current codebase)
+docs/five_features.md
+docs/level3_plus_vision.md
+docs/competitor_research.md
+docs/research_hands.md
+docs/exhaustive_test_strategy.md
