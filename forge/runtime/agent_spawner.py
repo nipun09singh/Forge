@@ -33,7 +33,7 @@ class SpawnedAgent:
     system_prompt: str = ""
     team: str = ""
     spawned_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    tasks_handled: int = 0
+
 
 
 class AgentSpawner:

@@ -13,6 +13,10 @@ from forge.runtime.tools import Tool, ToolParameter
 
 async def send_email(to: str, subject: str, body: str, html: str = "") -> str:
     """Send an email via SMTP. Configure via environment variables."""
+    from forge.runtime.integrations.rate_limiter import get_email_limiter, rate_limit_error
+    limiter = get_email_limiter()
+    if not limiter.acquire("email"):
+        return rate_limit_error("send_email", limiter, "email")
     smtp_host = os.getenv("SMTP_HOST", "localhost")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
     smtp_user = os.getenv("SMTP_USER", "")

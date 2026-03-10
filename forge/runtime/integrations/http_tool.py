@@ -44,6 +44,10 @@ async def http_request(url: str, method: str = "GET", headers: str = "{}", body:
     """Make an HTTP request and return the response."""
     import urllib.request
     import urllib.error
+    from forge.runtime.integrations.rate_limiter import get_http_limiter, rate_limit_error
+    limiter = get_http_limiter()
+    if not limiter.acquire("http"):
+        return rate_limit_error("http_request", limiter, "http")
 
     # SSRF protection: block internal/private URLs
     safe, reason = _is_url_safe(url)

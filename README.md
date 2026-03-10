@@ -6,7 +6,8 @@
 pip install -e .
 forge create "customer support agency for a SaaS product"
 # → 6 teams, 13 agents, 36 tools, 24 API endpoints, Docker-ready
-# → Self-test passes, API server starts, agents handle real tasks
+# → Self-test passes ✅ (1008 tests), API server starts, tools use mock backends by default
+# → Wire real backends via tool_backends.json — see "Configuring Real Tool Backends"
 ```
 
 ---
@@ -22,7 +23,7 @@ Forge is a **meta-agency** — a system that generates complete AI agencies. Des
 5. **Generates** a complete, deployable project with 40+ files
 6. **Validates** the output (syntax, imports, structure)
 
-Every generated agency includes: FastAPI server (24 endpoints), Docker deployment, real tool integrations, observability, cost tracking, guardrails, and human approval gates.
+Every generated agency includes: FastAPI server (24 endpoints), Docker deployment, tool integrations (mock by default, configurable with real backends), observability, cost tracking, guardrails, and human approval gates.
 
 ## Quick Start
 
@@ -56,7 +57,7 @@ Every generated agency includes:
 | Component | What It Does |
 |-----------|-------------|
 | **Multi-agent teams** | 10-20 specialized agents organized into functional teams |
-| **Real tools** | File I/O, shell commands, HTTP, SQL, email, webhooks — agents actually DO things |
+| **Real tools** | File I/O, shell commands, HTTP, SQL, email, webhooks — mock backends by default, wire real ones via `ToolExecutor` |
 | **Strategic planner** | Decomposes complex tasks into DAGs with parallel execution |
 | **Quality gates** | Self-critique loop ensures output quality before delivery |
 | **Observability** | Event logging, distributed tracing, per-agent cost tracking |
@@ -77,6 +78,7 @@ Every generated agency includes:
 | Triple quality critique (structural + technical + business) | ✅ | ❌ | ❌ | ❌ |
 | Revenue tracking + ROI dashboard | ✅ | ❌ | ❌ | ❌ |
 | Real tool execution (files, commands, HTTP, SQL) | ✅ | ⚠️ | ⚠️ | ✅ |
+| Configurable mock → real tool backends | ✅ | ❌ | ❌ | ❌ |
 | Pre-built domain packs (instant, no API key) | ✅ | ❌ | ❌ | ❌ |
 | 24-endpoint REST API generated automatically | ✅ | ❌ | ❌ | ❌ |
 
@@ -165,7 +167,7 @@ Generate instantly without an API key:
 ## Configuration
 
 ```bash
-# Required
+# Required for LLM-powered generation (not needed for pre-built packs)
 export OPENAI_API_KEY=sk-...          # For LLM-powered generation
 
 # Optional
@@ -175,6 +177,65 @@ export AGENCY_API_KEY=your-secret     # Enable API authentication
 export FORGE_BLOCK_PII=true           # Enable PII detection
 export FORGE_MAX_COST_PER_TASK=1.0    # Cost limit per task ($)
 ```
+
+See `.env.example` for a complete template including SMTP, database, and LLM configuration.
+
+## Configuring Real Tool Backends
+
+Generated tools use **mock backends by default** so agencies can self-test and demo without external dependencies. To wire real implementations:
+
+**Option 1: `tool_backends.json` config file**
+
+```json
+{
+    "process_refund": "myapp.refunds.process_refund",
+    "check_inventory": "myapp.inventory.check_stock"
+}
+```
+
+```python
+executor = ToolExecutor()
+executor.load_backends_from_config("tool_backends.json")
+```
+
+**Option 2: `backend_ref` on ToolBlueprint**
+
+```python
+ToolBlueprint(
+    name="process_refund",
+    description="Process a customer refund",
+    parameters=[...],
+    backend_ref="myapp.refunds.process_refund",  # dotted import path
+    is_async=True,
+)
+```
+
+**Option 3: Register backends programmatically**
+
+```python
+executor = ToolExecutor()
+executor.register("process_refund", myapp.refunds.process_refund)
+```
+
+See `examples/tool_backends.json` for a working example.
+
+## Current Status
+
+Forge is a **powerful prototype with real engineering** — here's what to know:
+
+| Area | Status |
+|------|--------|
+| Core generation pipeline | ✅ Fully functional (6-phase analysis, critique loop, code generation) |
+| Pre-built domain packs | ✅ Work instantly, no API key needed |
+| Security guardrails (PII, scope guards) | ✅ Comprehensive (91 tests) |
+| Observability & cost tracking | ✅ Event logging, distributed tracing, cost per agent |
+| Streaming (SSE) | ✅ Multi-provider support (OpenAI, Anthropic) |
+| Persistence | ✅ SQLite + in-memory backends |
+| Agent primitives system | ✅ 4 planners, 3 executors, 4 critics, escalation policies |
+| Domain-specific tools | ⚠️ Mock backends by default — configurable via `ToolExecutor` |
+| Agent execution on real tasks | ⚠️ Requires `OPENAI_API_KEY` (or compatible LLM API key) |
+| Integration tests | ⚠️ Require `OPENAI_API_KEY` environment variable |
+| Unit test suite | ✅ 1008 tests pass without API key |
 
 ## Project Structure
 

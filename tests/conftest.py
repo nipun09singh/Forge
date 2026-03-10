@@ -144,3 +144,16 @@ def tmp_dir():
 def event_log():
     """Fresh event log."""
     return EventLog()
+
+
+@pytest.fixture
+def real_llm_client():
+    """Real OpenAI client for integration tests. Skips if no API key."""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key or api_key == "your-api-key-here":
+        pytest.skip("OPENAI_API_KEY not set — skipping integration test")
+    from openai import AsyncOpenAI
+    return AsyncOpenAI(
+        api_key=api_key,
+        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )

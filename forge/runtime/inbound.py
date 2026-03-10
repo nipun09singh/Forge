@@ -8,6 +8,8 @@ This is what makes an agency a 24/7 autonomous operator.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -18,6 +20,21 @@ from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
+
+
+def verify_webhook_signature(payload: bytes, signature: str, secret: str) -> bool:
+    """Verify HMAC-SHA256 webhook signature.
+
+    Args:
+        payload: Raw request body bytes.
+        signature: Value of the X-Webhook-Signature header (e.g. "sha256=abcdef...").
+        secret: Shared secret used to compute the HMAC.
+
+    Returns:
+        True if the signature is valid, False otherwise.
+    """
+    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(f"sha256={expected}", signature)
 
 
 @dataclass
@@ -77,17 +94,17 @@ class FileDropChannel(InboundChannel):
 class APIQueueChannel(InboundChannel):
     """In-memory queue for tasks submitted via API."""
 
-    def __init__(self, api_key: str = "", auth_disabled: bool = False):
+    def __init__(self, api_key: str = "", auth_disabled: bool = False, webhook_secret: str = ""):
         self._queue: asyncio.Queue[InboundItem] = asyncio.Queue()
         self._api_key = api_key
         self._auth_disabled = auth_disabled
+        self._webhook_secret = webhook_secret
 
     def _verify_key(self, api_key: str | None) -> None:
         """Verify the API key for task submission.
 
         Raises PermissionError if auth is configured and the key is missing/invalid.
         """
-        import hmac
         if self._auth_disabled or not self._api_key:
             return
         if not api_key:
@@ -95,13 +112,53 @@ class APIQueueChannel(InboundChannel):
         if not hmac.compare_digest(api_key, self._api_key):
             raise PermissionError("Invalid API key for task submission")
 
-    async def submit(self, task: str, priority: str = "medium", metadata: dict | None = None, *, api_key: str | None = None) -> str:
+    def _verify_webhook(self, payload_bytes: bytes | None, signature: str | None) -> None:
+        """Verify the webhook HMAC-SHA256 signature.
+
+        If ``_webhook_secret`` is configured, a valid ``X-Webhook-Signature``
+        header value (``signature``) and the raw ``payload_bytes`` are required.
+        When no secret is configured a warning is logged for visibility but
+        processing is allowed (backward compatibility).
+
+        Raises PermissionError (HTTP 401) when verification fails.
+        """
+        if not self._webhook_secret:
+            logger.warning(
+                "WEBHOOK_SECRET is not set — webhook signature verification disabled. "
+                "Set WEBHOOK_SECRET to enable HMAC verification."
+            )
+            return
+
+        if not signature:
+            raise PermissionError("X-Webhook-Signature header is required when WEBHOOK_SECRET is configured")
+
+        if payload_bytes is None:
+            raise PermissionError("Payload bytes required for webhook signature verification")
+
+        if not verify_webhook_signature(payload_bytes, signature, self._webhook_secret):
+            raise PermissionError("Invalid webhook signature")
+
+    async def submit(
+        self,
+        task: str,
+        priority: str = "medium",
+        metadata: dict | None = None,
+        *,
+        api_key: str | None = None,
+        payload_bytes: bytes | None = None,
+        webhook_signature: str | None = None,
+    ) -> str:
         """Submit a task to the queue. Returns item ID.
 
         If the channel has an api_key configured, callers must supply a
         matching ``api_key`` or a ``PermissionError`` is raised.
+
+        If the channel has a webhook_secret configured, callers must supply
+        valid ``payload_bytes`` and ``webhook_signature`` or a
+        ``PermissionError`` is raised.
         """
         self._verify_key(api_key)
+        self._verify_webhook(payload_bytes, webhook_signature)
         import uuid
         item = InboundItem(
             id=f"api-{uuid.uuid4().hex[:8]}",
@@ -149,6 +206,7 @@ class InboundProcessor:
         max_concurrent: int = 5,
         api_key: str = "",
         auth_disabled: bool = False,
+        webhook_secret: str = "",
     ):
         self._execute_fn = execute_fn
         self.poll_interval = poll_interval
@@ -162,11 +220,15 @@ class InboundProcessor:
         self._history: list[dict[str, Any]] = []
 
         # Default channels
-        self._api_queue = APIQueueChannel(api_key=api_key, auth_disabled=auth_disabled)
+        self._api_queue = APIQueueChannel(
+            api_key=api_key,
+            auth_disabled=auth_disabled,
+            webhook_secret=webhook_secret or os.environ.get("WEBHOOK_SECRET", ""),
+        )
         self._channels["api"] = self._api_queue
         self._channels["file_drop"] = FileDropChannel()
 
-    def configure_api_auth(self, api_key: str = "", auth_disabled: bool = False) -> None:
+    def configure_api_auth(self, api_key: str = "", auth_disabled: bool = False, webhook_secret: str = "") -> None:
         """Configure auth on the built-in API queue channel.
 
         Useful for post-construction wiring (e.g. from an API server that
@@ -174,18 +236,39 @@ class InboundProcessor:
         """
         self._api_queue._api_key = api_key
         self._api_queue._auth_disabled = auth_disabled
+        if webhook_secret:
+            self._api_queue._webhook_secret = webhook_secret
 
     def add_channel(self, name: str, channel: InboundChannel) -> None:
         """Add a custom inbound channel."""
         self._channels[name] = channel
 
-    async def submit_task(self, task: str, priority: str = "medium", metadata: dict | None = None, *, api_key: str | None = None) -> str:
+    async def submit_task(
+        self,
+        task: str,
+        priority: str = "medium",
+        metadata: dict | None = None,
+        *,
+        api_key: str | None = None,
+        payload_bytes: bytes | None = None,
+        webhook_signature: str | None = None,
+    ) -> str:
         """Submit a task to the API queue.
 
         If the underlying APIQueueChannel has auth configured, the caller
         must supply a valid ``api_key``.
+
+        If a webhook_secret is configured, the caller must supply valid
+        ``payload_bytes`` and ``webhook_signature``.
         """
-        return await self._api_queue.submit(task, priority, metadata, api_key=api_key)
+        return await self._api_queue.submit(
+            task,
+            priority,
+            metadata,
+            api_key=api_key,
+            payload_bytes=payload_bytes,
+            webhook_signature=webhook_signature,
+        )
 
     async def start(self) -> None:
         """Start the inbound processing loop."""

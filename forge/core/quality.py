@@ -73,28 +73,39 @@ class QualityRubric:
         QualityDimension.API_DESIGN: 0.7,
         QualityDimension.SELF_IMPROVEMENT: 1.1,
         QualityDimension.UNIVERSALS: 1.4,
-        # Business ambition weights — intentionally higher than technical
-        QualityDimension.REVENUE_POTENTIAL: 1.8,
-        QualityDimension.CUSTOMER_ACQUISITION: 1.6,
+        # Business dimensions — opt-in, weighted equally (not inflated)
+        QualityDimension.REVENUE_POTENTIAL: 1.0,
+        QualityDimension.CUSTOMER_ACQUISITION: 1.0,
         QualityDimension.COMPETITIVE_ADVANTAGE: 1.5,
-        QualityDimension.MONETIZATION: 1.4,
-        QualityDimension.GROWTH_ENGINE: 1.7,
+        QualityDimension.MONETIZATION: 1.0,
+        QualityDimension.GROWTH_ENGINE: 1.0,
     }
 
+    # Core archetypes are always valuable for any agency
     MANDATORY_ARCHETYPE_ROLES = [
         "qa_reviewer",
-        "intake_coordinator", 
+        "intake_coordinator",
         "self_improvement",
         "analytics",
+    ]
+
+    # Business archetypes are opt-in — not every domain needs revenue agents
+    OPTIONAL_BUSINESS_ARCHETYPES = [
         "growth",
         "customer_success",
         "lead_generation",
         "revenue",
     ]
 
-    def __init__(self, threshold: float = 0.8, weights: dict[QualityDimension, float] | None = None):
+    def __init__(
+        self,
+        threshold: float = 0.8,
+        weights: dict[QualityDimension, float] | None = None,
+        include_business_archetypes: bool = False,
+    ):
         self.threshold = threshold
         self.weights = weights or self.DEFAULT_WEIGHTS
+        self.include_business_archetypes = include_business_archetypes
 
 
 class BlueprintEvaluator:
@@ -192,23 +203,49 @@ class BlueprintEvaluator:
         )
 
     def _eval_agent_depth(self, bp: AgencyBlueprint) -> DimensionScore:
-        """Are agent system prompts detailed enough?"""
+        """Are agent system prompts detailed and specific?"""
+        import re as _re
+
         agents = bp.all_agents
         findings = []
-        score = 1.0
+        agent_scores: list[float] = []
 
-        shallow_agents = []
+        role_patterns = _re.compile(
+            r"\b(you are|your role|act as|responsible for|specialist in|expert in)\b", _re.IGNORECASE,
+        )
+        constraint_patterns = _re.compile(
+            r"\b(must|never|always|do not|ensure|require|limit|only|forbidden|prohibited)\b", _re.IGNORECASE,
+        )
+        action_patterns = _re.compile(
+            r"\b(analyze|evaluate|generate|create|review|validate|monitor|report|execute|deliver|optimize)\b",
+            _re.IGNORECASE,
+        )
+        conditional_patterns = _re.compile(
+            r"\b(if|when|unless|otherwise|in case|provided that|depending on|should .+ then)\b", _re.IGNORECASE,
+        )
+        domain_patterns = _re.compile(
+            r"\b(api|database|workflow|pipeline|metric|compliance|security|integration|deployment|schema)\b",
+            _re.IGNORECASE,
+        )
+
+        weak_agents: list[str] = []
         for agent in agents:
-            prompt_len = len(agent.system_prompt)
-            if prompt_len < 100:
-                shallow_agents.append(agent.name)
-            elif prompt_len < 200:
-                score -= 0.05
+            prompt = agent.system_prompt
+            has_role = 0.2 if role_patterns.search(prompt) else 0.0
+            has_constraints = 0.2 if constraint_patterns.search(prompt) else 0.0
+            has_actions = 0.2 if len(action_patterns.findall(prompt)) >= 2 else (0.1 if action_patterns.search(prompt) else 0.0)
+            has_conditionals = 0.2 if conditional_patterns.search(prompt) else 0.0
+            has_domain = 0.2 if domain_patterns.search(prompt) else 0.0
+            agent_score = has_role + has_constraints + has_actions + has_conditionals + has_domain
+            agent_scores.append(agent_score)
+            if agent_score < 0.4:
+                weak_agents.append(agent.name)
 
-        if shallow_agents:
-            ratio = len(shallow_agents) / max(len(agents), 1)
-            score -= ratio * 0.5
-            findings.append(f"Shallow system prompts: {', '.join(shallow_agents)}")
+        avg_depth = sum(agent_scores) / max(len(agent_scores), 1)
+        score = avg_depth
+
+        if weak_agents:
+            findings.append(f"Weak prompts (lack specifics): {', '.join(weak_agents[:5])}")
 
         # Check for capabilities
         no_caps = [a.name for a in agents if not a.capabilities]
@@ -216,14 +253,18 @@ class BlueprintEvaluator:
             score -= 0.1 * min(len(no_caps) / max(len(agents), 1), 1.0)
             findings.append(f"Missing capabilities list: {', '.join(no_caps[:3])}")
 
+        if not findings:
+            findings.append("All agent prompts have good specificity")
+
         suggestions = []
         if score < 0.8:
-            suggestions.append("Expand agent system prompts to 3+ paragraphs with personality, expertise, constraints")
+            suggestions.append("Add role definitions, constraints, and conditional logic to agent prompts")
+            suggestions.append("Use domain-specific terminology and action verbs in prompts")
             suggestions.append("Add explicit capabilities lists to all agents")
 
         return DimensionScore(
             dimension=QualityDimension.AGENT_DEPTH,
-            score=max(0.0, score),
+            score=max(0.0, min(1.0, score)),
             weight=self.rubric.weights[QualityDimension.AGENT_DEPTH],
             findings=findings,
             suggestions=suggestions,
@@ -380,27 +421,64 @@ class BlueprintEvaluator:
 
     def _eval_resilience(self, bp: AgencyBlueprint) -> DimensionScore:
         """Does the agency handle errors and edge cases?"""
+        import re as _re
+
         findings = []
-        score = 0.7  # Start at 0.7 — resilience comes from runtime, not just blueprint
+        score = 0.0
 
-        # Check for error handling in agent prompts
-        error_aware = 0
-        for agent in bp.all_agents:
-            prompt_lower = agent.system_prompt.lower()
-            if any(word in prompt_lower for word in ("error", "fail", "fallback", "escalat", "retry", "exception")):
-                error_aware += 1
+        # 1. Check for error handling patterns in agent prompts (structural, not keyword)
+        error_handling_pattern = _re.compile(
+            r"\b(try|except|catch|handle error|on failure|error handling|gracefully)\b", _re.IGNORECASE,
+        )
+        agents_with_handling = [a for a in bp.all_agents if error_handling_pattern.search(a.system_prompt)]
+        handling_ratio = len(agents_with_handling) / max(len(bp.all_agents), 1)
+        if handling_ratio >= 0.3:
+            score += 0.25
+            findings.append(f"{len(agents_with_handling)} agents have error handling patterns")
+        elif agents_with_handling:
+            score += 0.1
 
-        awareness_ratio = error_aware / max(len(bp.all_agents), 1)
-        if awareness_ratio < 0.3:
-            score -= 0.2
-            findings.append("Few agents mention error handling in their prompts")
+        # 2. Check for escalation paths in workflows
+        escalation_pattern = _re.compile(r"\b(escalat|notify|alert|handoff|hand off|fallback)\b", _re.IGNORECASE)
+        escalation_wfs = [
+            wf for wf in bp.workflows
+            if any(escalation_pattern.search(s.description) for s in wf.steps)
+        ]
+        if escalation_wfs:
+            score += 0.25
+            findings.append(f"Escalation paths in {len(escalation_wfs)} workflow(s)")
         else:
-            score += 0.15
+            findings.append("No escalation paths defined in workflows")
+
+        # 3. Check for fallback agents in teams
+        fallback_agents = [
+            a for a in bp.all_agents
+            if _re.search(r"\b(fallback|backup|failover)\b", a.name.lower() + " " + a.system_prompt.lower()[:200])
+        ]
+        if fallback_agents:
+            score += 0.25
+            findings.append(f"Fallback agents: {', '.join(a.name for a in fallback_agents)}")
+
+        # 4. Check for retry configuration in tools
+        retry_tools = [
+            t for t in bp.all_tools
+            if any(p.get("name", "").lower() in ("retry", "retries", "max_retries", "retry_count", "timeout")
+                   for p in t.parameters)
+        ]
+        if retry_tools:
+            score += 0.25
+            findings.append(f"Retry config in {len(retry_tools)} tool(s)")
+
+        # Baseline: having agents at all provides some resilience
+        if bp.all_agents and score == 0.0:
+            score = 0.3
 
         suggestions = []
         if score < 0.8:
-            suggestions.append("Include error handling and escalation instructions in agent system prompts")
-            suggestions.append("Add fallback behaviors for when tools fail or agents are unavailable")
+            suggestions.append("Add error handling instructions to agent system prompts")
+            suggestions.append("Define escalation steps in workflows for failure scenarios")
+            suggestions.append("Add fallback agents for critical functions")
+            suggestions.append("Include retry/timeout parameters in tool definitions")
 
         return DimensionScore(
             dimension=QualityDimension.RESILIENCE,
@@ -492,29 +570,46 @@ class BlueprintEvaluator:
         score = 1.0
 
         agents_lower = {a.name.lower().replace(" ", "_"): a for a in bp.all_agents}
-        all_text = " ".join(a.name.lower() + " " + a.system_prompt.lower()[:100] for a in bp.all_agents)
 
-        missing = []
-        for archetype in QualityRubric.MANDATORY_ARCHETYPE_ROLES:
-            # Flexible matching — check name, role, or prompt
-            found = False
+        def _agent_matches_archetype(archetype: str) -> bool:
+            """Check if any agent matches an archetype by name or role in prompt."""
+            archetype_terms = archetype.replace("_", " ").split()
             for name, agent in agents_lower.items():
-                archetype_terms = archetype.replace("_", " ").split()
-                if any(t in name or t in agent.system_prompt.lower()[:200] for t in archetype_terms):
-                    found = True
-                    break
-            if not found:
-                missing.append(archetype)
+                prompt_start = agent.system_prompt.lower()[:200]
+                role_val = agent.role.value.lower()
+                if any(t in name or t in role_val or t in prompt_start for t in archetype_terms):
+                    return True
+            return False
+
+        # Check core (mandatory) archetypes — full penalty for missing
+        missing_core = []
+        for archetype in QualityRubric.MANDATORY_ARCHETYPE_ROLES:
+            if not _agent_matches_archetype(archetype):
+                missing_core.append(archetype)
                 score -= 0.25
 
-        if missing:
-            findings.append(f"Missing universal archetypes: {', '.join(missing)}")
-        else:
+        if missing_core:
+            findings.append(f"Missing core archetypes: {', '.join(missing_core)}")
+
+        # Check business archetypes only when opted-in, with a lighter penalty
+        missing_business = []
+        if self.rubric.include_business_archetypes:
+            for archetype in QualityRubric.OPTIONAL_BUSINESS_ARCHETYPES:
+                if not _agent_matches_archetype(archetype):
+                    missing_business.append(archetype)
+                    score -= 0.10
+
+            if missing_business:
+                findings.append(f"Missing optional business archetypes: {', '.join(missing_business)}")
+
+        if not missing_core and not missing_business:
             findings.append("All universal archetypes present")
 
         suggestions = []
-        if missing:
-            suggestions.append(f"Add mandatory agents: {', '.join(missing)}")
+        if missing_core:
+            suggestions.append(f"Add mandatory agents: {', '.join(missing_core)}")
+        if missing_business:
+            suggestions.append(f"Consider adding business agents: {', '.join(missing_business)}")
 
         return DimensionScore(
             dimension=QualityDimension.UNIVERSALS,
@@ -527,51 +622,59 @@ class BlueprintEvaluator:
     def _eval_revenue_potential(self, bp: AgencyBlueprint) -> DimensionScore:
         """Does this agency have clear revenue-generating capability?"""
         findings = []
-        score = 0.3  # Start low — must prove revenue potential
+        score = 0.0
 
-        all_text = " ".join(
-            a.system_prompt.lower() + " " + " ".join(a.capabilities)
-            for a in bp.all_agents
-        ).lower()
-
-        # Check for revenue-oriented language in agents
-        revenue_terms = ("revenue", "sales", "monetiz", "profit", "pricing", "billing",
-                         "payment", "subscription", "upsell", "cross-sell", "conversion",
-                         "roi", "cost sav", "value", "customer lifetime")
-        matches = sum(1 for t in revenue_terms if t in all_text)
-        if matches >= 5:
-            score += 0.4
-            findings.append(f"Strong revenue awareness ({matches} revenue-related concepts found)")
-        elif matches >= 2:
-            score += 0.2
-            findings.append(f"Some revenue awareness ({matches} revenue concepts)")
-        else:
-            findings.append("Almost no revenue-oriented language in agent prompts")
-
-        # Check for dedicated revenue/sales agents
-        revenue_agents = [a for a in bp.all_agents if any(
-            t in a.name.lower() or t in a.title.lower()
-            for t in ("sales", "revenue", "growth", "monetiz", "billing", "pricing")
-        )]
-        if revenue_agents:
-            score += 0.2
-            findings.append(f"Revenue-focused agents: {', '.join(a.name for a in revenue_agents)}")
-        else:
-            findings.append("No dedicated revenue or sales agents")
-
-        # Check for revenue-related tools
-        revenue_tools = [t for t in bp.all_tools if any(
+        # 1. Check for payment/billing tools (0.3)
+        payment_terms = ("stripe", "payment", "billing", "invoice", "charge", "checkout", "paypal")
+        payment_tools = [t for t in bp.all_tools if any(
             term in t.name.lower() or term in t.description.lower()
-            for term in ("payment", "invoice", "price", "billing", "revenue", "sales", "convert")
+            for term in payment_terms
         )]
-        if revenue_tools:
-            score += 0.1
+        if payment_tools:
+            score += 0.3
+            findings.append(f"Payment/billing tools: {', '.join(t.name for t in payment_tools[:3])}")
+        else:
+            findings.append("No payment or billing tools found")
+
+        # 2. Check for sales/conversion workflow steps (0.3)
+        sales_steps = []
+        for wf in bp.workflows:
+            for step in wf.steps:
+                desc = step.description.lower()
+                if any(t in desc for t in ("convert", "close", "proposal", "quote", "upsell", "sales", "purchase")):
+                    sales_steps.append(f"{wf.name}:{step.description[:40]}")
+        if sales_steps:
+            score += 0.3
+            findings.append(f"Sales/conversion steps in workflows: {len(sales_steps)}")
+        else:
+            findings.append("No sales or conversion steps in workflows")
+
+        # 3. Check for customer-facing API endpoints (0.2)
+        customer_endpoints = [ep for ep in bp.api_endpoints if any(
+            t in ep.path.lower() for t in ("customer", "order", "purchase", "subscribe", "pricing", "quote")
+        )]
+        if customer_endpoints:
+            score += 0.2
+            findings.append(f"Customer-facing endpoints: {', '.join(ep.path for ep in customer_endpoints[:3])}")
+
+        # 4. Check for pricing logic (0.2)
+        pricing_agents = [a for a in bp.all_agents if any(
+            t in a.name.lower() or t in a.system_prompt.lower()[:300]
+            for t in ("pricing", "discount", "tier", "plan", "subscription model")
+        )]
+        pricing_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() for term in ("price", "pricing", "discount", "tier")
+        )]
+        if pricing_agents or pricing_tools:
+            score += 0.2
+            findings.append("Pricing logic found in agents or tools")
 
         suggestions = []
         if score < 0.8:
-            suggestions.append("Add agents specifically designed to drive revenue (sales, upselling, pricing optimization)")
-            suggestions.append("Include revenue-tracking tools and conversion metrics")
-            suggestions.append("Ensure agent prompts explicitly mention revenue goals and KPIs")
+            suggestions.append("Add payment processing tools (Stripe, billing integrations)")
+            suggestions.append("Include sales/conversion steps in workflows")
+            suggestions.append("Add customer-facing API endpoints for orders or subscriptions")
+            suggestions.append("Define pricing logic in dedicated agents or tools")
 
         return DimensionScore(
             dimension=QualityDimension.REVENUE_POTENTIAL,
@@ -584,49 +687,58 @@ class BlueprintEvaluator:
     def _eval_customer_acquisition(self, bp: AgencyBlueprint) -> DimensionScore:
         """Can this agency attract and convert customers?"""
         findings = []
-        score = 0.3
+        score = 0.0
 
-        all_text = " ".join(
-            a.system_prompt.lower() + " " + " ".join(a.capabilities)
-            for a in bp.all_agents
-        ).lower()
-
-        # Check for customer acquisition concepts
-        acq_terms = ("lead", "prospect", "acquisition", "onboard", "signup", "register",
-                      "funnel", "outreach", "marketing", "campaign", "referral", "viral",
-                      "demo", "trial", "nurtur", "qualify", "pipeline")
-        matches = sum(1 for t in acq_terms if t in all_text)
-        if matches >= 5:
-            score += 0.4
-            findings.append(f"Strong acquisition focus ({matches} acquisition concepts)")
-        elif matches >= 2:
-            score += 0.2
-            findings.append(f"Some acquisition awareness ({matches} concepts)")
+        # 1. Check for lead intake API endpoints (0.25)
+        intake_endpoints = [ep for ep in bp.api_endpoints if any(
+            t in ep.path.lower() for t in ("lead", "intake", "signup", "register", "contact", "inquiry")
+        )]
+        if intake_endpoints:
+            score += 0.25
+            findings.append(f"Lead intake endpoints: {', '.join(ep.path for ep in intake_endpoints[:3])}")
         else:
-            findings.append("No customer acquisition strategy in agent design")
+            findings.append("No lead intake API endpoints")
 
-        # Check for intake/onboarding workflow
-        intake_wfs = [wf for wf in bp.workflows if any(
+        # 2. Check for outbound communication tools (0.25)
+        comm_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() or term in t.description.lower()
+            for term in ("email", "sms", "notify", "send_message", "outreach", "newsletter", "campaign")
+        )]
+        if comm_tools:
+            score += 0.25
+            findings.append(f"Outbound communication tools: {', '.join(t.name for t in comm_tools[:3])}")
+        else:
+            findings.append("No outbound communication tools (email, SMS, etc.)")
+
+        # 3. Check for CRM/database tools for customer tracking (0.25)
+        crm_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() or term in t.description.lower()
+            for term in ("crm", "customer_record", "lead_track", "pipeline", "contact_db", "prospect")
+        )]
+        crm_agents = [a for a in bp.all_agents if any(
+            t in a.name.lower() for t in ("crm", "lead", "prospect", "pipeline")
+        )]
+        if crm_tools or crm_agents:
+            score += 0.25
+            findings.append("CRM/customer tracking capability found")
+
+        # 4. Check for onboarding workflows (0.25)
+        onboard_wfs = [wf for wf in bp.workflows if any(
             t in wf.name.lower() or t in wf.description.lower()
-            for t in ("intake", "onboard", "acquisition", "lead", "signup")
+            for t in ("onboard", "intake", "welcome", "signup", "registration")
         )]
-        if intake_wfs:
-            score += 0.2
-            findings.append("Has intake/onboarding workflows")
-        
-        # Check for customer-facing agents
-        customer_agents = [a for a in bp.all_agents if any(
-            t in a.name.lower() or t in a.role.value
-            for t in ("intake", "customer", "support", "success", "onboard")
-        )]
-        if customer_agents:
-            score += 0.1
+        if onboard_wfs:
+            score += 0.25
+            findings.append(f"Onboarding workflows: {', '.join(wf.name for wf in onboard_wfs[:3])}")
+        else:
+            findings.append("No onboarding workflows defined")
 
         suggestions = []
         if score < 0.8:
-            suggestions.append("Add a Lead Generation agent that identifies and qualifies prospects")
-            suggestions.append("Create an onboarding workflow that converts leads to active users")
-            suggestions.append("Include referral and viral growth mechanisms")
+            suggestions.append("Add lead intake API endpoints (/api/lead, /api/signup)")
+            suggestions.append("Include outbound communication tools (email, SMS)")
+            suggestions.append("Add CRM or customer tracking tools")
+            suggestions.append("Create onboarding workflows for new customers")
 
         return DimensionScore(
             dimension=QualityDimension.CUSTOMER_ACQUISITION,
@@ -693,42 +805,50 @@ class BlueprintEvaluator:
     def _eval_monetization(self, bp: AgencyBlueprint) -> DimensionScore:
         """Is there a clear path to charging money for this agency?"""
         findings = []
-        score = 0.3
+        score = 0.0
 
-        # API endpoints = can be offered as a service
+        # 1. Billing integration (0.25)
+        billing_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() or term in t.description.lower()
+            for term in ("billing", "invoice", "charge", "payment", "stripe", "checkout")
+        )]
+        if billing_tools:
+            score += 0.25
+            findings.append(f"Billing tools: {', '.join(t.name for t in billing_tools[:3])}")
+
+        # 2. Subscription management tools (0.25)
+        sub_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() or term in t.description.lower()
+            for term in ("subscri", "plan", "tier", "upgrade", "downgrade", "recurring")
+        )]
+        sub_endpoints = [ep for ep in bp.api_endpoints if any(
+            t in ep.path.lower() for t in ("subscri", "plan", "billing", "pricing")
+        )]
+        if sub_tools or sub_endpoints:
+            score += 0.25
+            findings.append("Subscription/plan management capability")
+
+        # 3. API endpoints for service delivery (0.25)
         if len(bp.api_endpoints) >= 3:
-            score += 0.2
-            findings.append(f"Service-ready: {len(bp.api_endpoints)} API endpoints (can be offered as SaaS)")
+            score += 0.25
+            findings.append(f"Service-ready: {len(bp.api_endpoints)} API endpoints (SaaS-capable)")
         elif bp.api_endpoints:
             score += 0.1
 
-        # Multiple teams = comprehensive service offering
-        if len(bp.teams) >= 3:
-            score += 0.15
-            findings.append("Comprehensive offering: multiple specialized teams")
-
-        # Workflows = repeatable processes (subscription-worthy)
-        if len(bp.workflows) >= 3:
-            score += 0.15
-            findings.append("Process automation: multiple workflows (subscription model viable)")
-
-        # Domain specificity = higher willingness to pay
-        if len(bp.domain) > 100:
+        # 4. Value-delivery workflows (0.25)
+        value_wfs = [wf for wf in bp.workflows if len(wf.steps) >= 2]
+        if len(value_wfs) >= 2:
+            score += 0.25
+            findings.append(f"{len(value_wfs)} multi-step workflows deliver repeatable value")
+        elif value_wfs:
             score += 0.1
-            findings.append("Domain-specific solution (commands premium pricing)")
-
-        # Analytics/reporting = proof of value to customers
-        analytics_capable = any("analytic" in a.name.lower() or "report" in a.name.lower() for a in bp.all_agents)
-        if analytics_capable:
-            score += 0.1
-            findings.append("Can demonstrate ROI to customers via analytics/reporting")
 
         suggestions = []
         if score < 0.8:
+            suggestions.append("Add billing/payment integration tools")
+            suggestions.append("Include subscription management endpoints")
             suggestions.append("Add more API endpoints to package as a SaaS product")
-            suggestions.append("Include analytics/reporting to prove ROI to paying customers")
-            suggestions.append("Design workflows that map to specific billable services")
-            suggestions.append("Add usage tracking for metered billing")
+            suggestions.append("Design multi-step workflows that deliver billable value")
 
         return DimensionScore(
             dimension=QualityDimension.MONETIZATION,
@@ -741,56 +861,64 @@ class BlueprintEvaluator:
     def _eval_growth_engine(self, bp: AgencyBlueprint) -> DimensionScore:
         """Does this agency compound and scale revenue over time?"""
         findings = []
-        score = 0.2  # Start very low — growth engines are rare and valuable
+        score = 0.0
 
-        all_text = " ".join(
-            a.system_prompt.lower() + " " + " ".join(a.capabilities)
-            for a in bp.all_agents
-        ).lower()
-
-        # Check for growth-compounding concepts
-        growth_terms = ("growth", "scale", "automat", "compound", "network effect",
-                        "viral", "referral", "retention", "lifetime value", "ltv",
-                        "recurring", "repeat", "expand", "flywheel", "loop")
-        matches = sum(1 for t in growth_terms if t in all_text)
-        if matches >= 5:
-            score += 0.3
-            findings.append(f"Growth engine concepts present ({matches} growth terms)")
-        elif matches >= 2:
-            score += 0.15
-
-        # Self-improvement = gets better over time (compounding advantage)
-        has_improvement = any("improv" in a.name.lower() for a in bp.all_agents)
-        if has_improvement:
-            score += 0.15
-            findings.append("Self-improving: gets better over time (compounding advantage)")
-
-        # Data/learning flywheel
-        has_memory_usage = any("memory" in a.system_prompt.lower() or "learn" in a.system_prompt.lower() for a in bp.all_agents)
-        if has_memory_usage:
-            score += 0.1
-            findings.append("Learning flywheel: agents learn from interactions")
-
-        # Scalability (can handle 10x-100x growth without proportional cost)
-        scalable = any(t.allow_dynamic_scaling for t in bp.teams)
-        if scalable:
-            score += 0.15
-            findings.append("Scales without linear cost increase (AI economics)")
-
-        # Retention/success agents (keeps customers = recurring revenue)
-        retention_agents = [a for a in bp.all_agents if any(
-            t in a.name.lower() for t in ("retention", "success", "loyalty", "satisfaction")
+        # 1. Analytics/metrics tools (0.25)
+        analytics_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() or term in t.description.lower()
+            for term in ("analytic", "metric", "track", "measure", "dashboard", "report", "kpi")
         )]
-        if retention_agents:
+        analytics_agents = [a for a in bp.all_agents if any(
+            t in a.name.lower() for t in ("analytic", "metric", "monitor", "report")
+        )]
+        if analytics_tools or analytics_agents:
+            score += 0.25
+            findings.append(f"Analytics/metrics capability ({len(analytics_tools)} tools, {len(analytics_agents)} agents)")
+        else:
+            findings.append("No analytics or metrics tools")
+
+        # 2. Feedback collection mechanisms (0.25)
+        feedback_wfs = [wf for wf in bp.workflows if any(
+            any(t in s.description.lower() for t in ("feedback", "survey", "review", "satisfaction", "nps"))
+            for s in wf.steps
+        )]
+        feedback_tools = [t for t in bp.all_tools if any(
+            term in t.name.lower() or term in t.description.lower()
+            for term in ("feedback", "survey", "review", "rating")
+        )]
+        if feedback_wfs or feedback_tools:
+            score += 0.25
+            findings.append("Feedback collection mechanisms found")
+
+        # 3. Automated follow-up workflows (0.25)
+        followup_wfs = [wf for wf in bp.workflows if any(
+            any(t in s.description.lower() for t in ("follow-up", "followup", "nurture", "remind", "re-engage", "retention"))
+            for s in wf.steps
+        )]
+        if followup_wfs:
+            score += 0.25
+            findings.append(f"Automated follow-up workflows: {len(followup_wfs)}")
+        else:
+            findings.append("No automated follow-up workflows")
+
+        # 4. Self-improvement/learning agents (0.25)
+        learning_agents = [a for a in bp.all_agents if any(
+            t in a.name.lower() for t in ("improv", "learn", "optim", "adapt")
+        )]
+        scalable = any(t.allow_dynamic_scaling for t in bp.teams)
+        if learning_agents:
+            score += 0.15
+            findings.append(f"Self-improvement agents: {', '.join(a.name for a in learning_agents)}")
+        if scalable:
             score += 0.1
-            findings.append("Retention focus: keeps customers paying month after month")
+            findings.append("Dynamic scaling enabled for growth")
 
         suggestions = []
         if score < 0.8:
-            suggestions.append("Add a Growth Hacker agent that finds and exploits viral/referral loops")
-            suggestions.append("Add a Customer Success agent for retention and LTV maximization")
-            suggestions.append("Design agents that learn from every interaction (compounding intelligence)")
-            suggestions.append("Include referral/viral growth mechanisms in workflows")
+            suggestions.append("Add analytics/metrics tools and agents")
+            suggestions.append("Include feedback collection steps in workflows")
+            suggestions.append("Create automated follow-up/nurture workflows")
+            suggestions.append("Add self-improvement agents that learn from interactions")
 
         return DimensionScore(
             dimension=QualityDimension.GROWTH_ENGINE,

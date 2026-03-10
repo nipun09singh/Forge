@@ -27,6 +27,7 @@ from typing import Any
 from forge.runtime.types import LLMClient
 
 from forge.runtime.guardrails import GuardrailsEngine
+from forge.runtime.model_router import ModelRouter
 from forge.runtime.observability import EventLog, TraceContext, MODEL_COSTS, Event, EventType
 from forge.runtime.phase_gates import PhaseGateEnforcer
 from forge.runtime.structured_outputs import parse_completion_signal
@@ -77,6 +78,7 @@ class OrchestratorAgent:
         quality_bar: str = "production-ready",
         max_duration_seconds: float = 3600.0,
         max_cost_usd: float = 5.0,
+        max_concurrent_tools: int = 5,
     ):
         self._llm_client: LLMClient | None = llm_client
         self.model = model
@@ -84,12 +86,14 @@ class OrchestratorAgent:
         self.quality_bar = quality_bar
         self.max_duration_seconds = max_duration_seconds
         self.max_cost_usd = max_cost_usd
+        self._max_concurrent_tools = max_concurrent_tools
         self._tools: list[Any] = []
         self._tool_map: dict[str, Any] = {}
         self._tool_library: dict = {}
         self._event_log: EventLog | None = None
         self._trace_ctx: TraceContext | None = None
         self._guardrails: GuardrailsEngine | None = None
+        self._model_router: ModelRouter | None = None
         self._token_counter = TokenCounter(model=self.model)
         self._confidence_scorer = ConfidenceScorer()
 
@@ -104,6 +108,159 @@ class OrchestratorAgent:
 
     def set_guardrails(self, guardrails: GuardrailsEngine) -> None:
         self._guardrails = guardrails
+
+    def set_model_router(self, router: ModelRouter) -> None:
+        """Set smart model router for cost-optimized LLM selection."""
+        self._model_router = router
+
+    async def _execute_single_tool_call(
+        self, tc, project_dir, phase_enforcer, files_created,
+    ) -> dict[str, Any]:
+        """Execute a single tool call with all pre-checks. Returns a result dict.
+
+        The returned dict contains the standard ``role``/``content``/``tool_call_id``
+        fields plus a private ``_semantic_tag`` used by the caller to tag the
+        message for the semantic budget.
+        """
+        fn_name = tc.function.name
+        try:
+            args = json.loads(tc.function.arguments)
+        except json.JSONDecodeError:
+            args = {}
+
+        tool = self._tool_map.get(fn_name)
+
+        # Phase gate check — block wrong-phase tools
+        allowed, phase_reason = phase_enforcer.is_tool_allowed(fn_name)
+        if not allowed:
+            return {
+                "role": "tool",
+                "content": f"⛔ Phase gate: {phase_reason}",
+                "tool_call_id": tc.id,
+                "_semantic_tag": "tool_results",
+            }
+
+        # Guardrails check
+        if self._guardrails:
+            violations = self._guardrails.check_tool_call(fn_name, args)
+            blocked = [v for v in violations if v.severity == "block"]
+            if blocked:
+                return {
+                    "role": "tool",
+                    "content": f"Blocked by guardrails: {blocked[0].description}",
+                    "tool_call_id": tc.id,
+                    "_semantic_tag": "tool_results",
+                }
+
+        if not tool:
+            return {
+                "role": "tool",
+                "content": f"Unknown tool: {fn_name}",
+                "tool_call_id": tc.id,
+                "_semantic_tag": "tool_results",
+            }
+
+        # Confidence-gated autonomy check
+        confidence = self._confidence_scorer.score_tool_call(fn_name, args)
+        if confidence.level == ConfidenceLevel.LOW:
+            logger.warning(
+                f"LOW confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
+            )
+            if self._event_log:
+                self._event_log.emit(Event(
+                    event_type=EventType.TOOL_USE,
+                    agent_name="orchestrator",
+                    data={"tool": fn_name, "confidence": confidence.score, "confidence_level": "low", "reasoning": confidence.reasoning},
+                    level="warning",
+                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                ))
+            return {
+                "role": "tool",
+                "content": json.dumps({
+                    "warning": f"LOW CONFIDENCE ({confidence.score:.2f}): {confidence.reasoning}",
+                    "action_required": "This tool call has low confidence. The tool was NOT executed. Please reconsider or provide more context before retrying.",
+                    "tool_name": fn_name,
+                    "blocked": True,
+                }),
+                "tool_call_id": tc.id,
+                "_semantic_tag": None,
+            }
+        elif confidence.level == ConfidenceLevel.MEDIUM:
+            logger.info(
+                f"  ⚠️ Medium confidence ({confidence.score:.2f}): {confidence.reasoning}"
+            )
+
+        try:
+            # Set workdir for command/file tools
+            if fn_name == "run_command" and "workdir" not in args:
+                args["workdir"] = str(project_dir)
+            if fn_name == "read_write_file":
+                if "path" in args and not os.path.isabs(args["path"]):
+                    args["path"] = str(project_dir / args["path"])
+
+            if self._event_log:
+                self._event_log.emit_tool_use(
+                    agent_name="orchestrator",
+                    tool_name=fn_name,
+                    args=args,
+                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                )
+
+            _tool_start = time.time()
+            output = await tool.run(**args)
+            _tool_duration = (time.time() - _tool_start) * 1000
+            logger.info(f"  🔧 {fn_name}: {str(output)[:80]}")
+
+            if self._event_log:
+                self._event_log.emit_tool_result(
+                    agent_name="orchestrator", tool_name=fn_name, success=True,
+                    output_preview=str(output)[:200], duration_ms=_tool_duration,
+                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                )
+
+            # Track files created during the loop
+            if fn_name == "read_write_file" and "path" in args:
+                rel = os.path.relpath(args["path"], str(project_dir))
+                if rel not in files_created and not rel.startswith(".."):
+                    files_created.append(rel)
+                    phase_enforcer.record_file_created(rel)
+
+            phase_enforcer.record_tool_use(fn_name)
+            if fn_name == "run_command":
+                phase_enforcer.record_command_output(
+                    args.get("command", ""), str(output)
+                )
+
+            # Determine semantic tag
+            if fn_name in ("web_search", "browse_web"):
+                tag = "research"
+            elif fn_name == "read_write_file" and args.get("action") == "write" and any(
+                kw in str(args.get("path", "")).lower() for kw in ("spec", "plan", "design", "architecture")
+            ):
+                tag = "spec"
+            else:
+                tag = "tool_results"
+
+            return {
+                "role": "tool",
+                "content": str(output)[:5000],
+                "tool_call_id": tc.id,
+                "_semantic_tag": tag,
+            }
+        except Exception as e:
+            logger.warning(f"  ❌ {fn_name} error: {e}")
+            if self._event_log:
+                self._event_log.emit_tool_result(
+                    agent_name="orchestrator", tool_name=fn_name, success=False,
+                    output_preview=str(e)[:200], duration_ms=(time.time() - _tool_start) * 1000,
+                    trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
+                )
+            return {
+                "role": "tool",
+                "content": f"Error: {e}",
+                "tool_call_id": tc.id,
+                "_semantic_tag": "tool_results",
+            }
 
     def _ensure_tools(self) -> None:
         """Load primitive tools + discover_tool. The AI discovers everything else at runtime."""
@@ -322,9 +479,20 @@ class OrchestratorAgent:
             phase_enforcer.tick()
 
             try:
+                # Smart model routing for cost optimization
+                _effective_model = self.model
+                if self._model_router:
+                    task_preview = conversation[-1].get("content", "") if conversation else ""
+                    _effective_model = self._model_router.select_model(
+                        task=task_preview[:500],
+                        messages=conversation,
+                        has_tools=bool(tools_schema),
+                        agent_role="orchestrator",
+                    )
+
                 # THINK: Call LLM with current conversation + tools
                 kwargs: dict[str, Any] = {
-                    "model": self.model,
+                    "model": _effective_model,
                     "messages": conversation,
                     "temperature": 0.3,
                 }
@@ -334,7 +502,7 @@ class OrchestratorAgent:
                 if self._event_log:
                     self._event_log.emit_llm_call(
                         agent_name="orchestrator",
-                        model=self.model,
+                        model=_effective_model,
                         messages_count=len(conversation),
                         tools_count=len(tools_schema) if tools_schema else 0,
                         trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
@@ -348,7 +516,7 @@ class OrchestratorAgent:
                 if self._event_log and hasattr(response, 'usage') and response.usage:
                     self._event_log.emit_llm_response(
                         agent_name="orchestrator",
-                        model=self.model,
+                        model=_effective_model,
                         prompt_tokens=getattr(response.usage, 'prompt_tokens', 0) or 0,
                         completion_tokens=getattr(response.usage, 'completion_tokens', 0) or 0,
                         has_tool_calls=bool(choice.message.tool_calls),
@@ -361,8 +529,18 @@ class OrchestratorAgent:
                     prompt_tok = getattr(response.usage, 'prompt_tokens', 0) or 0
                     completion_tok = getattr(response.usage, 'completion_tokens', 0) or 0
                     total_tokens += prompt_tok + completion_tok
-                    costs = MODEL_COSTS.get(self.model, MODEL_COSTS.get("gpt-4", {"input": 0.03, "output": 0.06}))
+                    costs = MODEL_COSTS.get(_effective_model, MODEL_COSTS.get("gpt-4", {"input": 0.03, "output": 0.06}))
                     total_cost += (prompt_tok / 1000 * costs["input"]) + (completion_tok / 1000 * costs["output"])
+
+                    # Record outcome in model router feedback loop
+                    if self._model_router:
+                        self._model_router.record_outcome(
+                            task_id=task_preview[:500] if conversation else "orchestrator",
+                            model_used=_effective_model,
+                            success=True,
+                            tokens_used=prompt_tok + completion_tok,
+                            cost=(prompt_tok / 1000 * costs["input"]) + (completion_tok / 1000 * costs["output"]),
+                        )
 
                 # Check cost budget
                 if total_cost > self.max_cost_usd:
@@ -386,150 +564,36 @@ class OrchestratorAgent:
                     })
                     semantic_budget.tag_message(conversation[-1], "conversation")
 
-                    # Execute each tool call
-                    for tc in choice.message.tool_calls:
-                        fn_name = tc.function.name
-                        try:
-                            args = json.loads(tc.function.arguments)
-                        except json.JSONDecodeError:
-                            args = {}
+                    # Execute tool calls in parallel with concurrency limit
+                    semaphore = asyncio.Semaphore(self._max_concurrent_tools)
 
-                        tool = self._tool_map.get(fn_name)
+                    async def _run_one(tc):
+                        async with semaphore:
+                            return await self._execute_single_tool_call(
+                                tc, project_dir, phase_enforcer, files_created,
+                            )
 
-                        # Phase gate check — block wrong-phase tools
-                        allowed, phase_reason = phase_enforcer.is_tool_allowed(fn_name)
-                        if not allowed:
-                            conversation.append({
+                    results = await asyncio.gather(
+                        *[_run_one(tc) for tc in choice.message.tool_calls],
+                        return_exceptions=True,
+                    )
+
+                    # Append results to conversation in original order
+                    for i, result in enumerate(results):
+                        if isinstance(result, Exception):
+                            tc = choice.message.tool_calls[i]
+                            msg = {
                                 "role": "tool",
-                                "content": f"⛔ Phase gate: {phase_reason}",
+                                "content": f"Error: {result}",
                                 "tool_call_id": tc.id,
-                            })
-                            semantic_budget.tag_message(conversation[-1], "tool_results")
-                            continue
-
-                        # Guardrails check
-                        if self._guardrails:
-                            violations = self._guardrails.check_tool_call(fn_name, args)
-                            blocked = [v for v in violations if v.severity == "block"]
-                            if blocked:
-                                conversation.append({
-                                    "role": "tool",
-                                    "content": f"Blocked by guardrails: {blocked[0].description}",
-                                    "tool_call_id": tc.id,
-                                })
-                                semantic_budget.tag_message(conversation[-1], "tool_results")
-                                continue
-
-                        if tool:
-                            # Confidence-gated autonomy check
-                            confidence = self._confidence_scorer.score_tool_call(fn_name, args)
-                            if confidence.level == ConfidenceLevel.LOW:
-                                logger.warning(
-                                    f"LOW confidence ({confidence.score:.2f}) for tool '{fn_name}': {confidence.reasoning}"
-                                )
-                                if self._event_log:
-                                    self._event_log.emit(Event(
-                                        event_type=EventType.TOOL_USE,
-                                        agent_name="orchestrator",
-                                        data={"tool": fn_name, "confidence": confidence.score, "confidence_level": "low", "reasoning": confidence.reasoning},
-                                        level="warning",
-                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                                    ))
-                                # LOW confidence: inject warning and ask LLM to confirm before executing
-                                conversation.append({
-                                    "role": "tool",
-                                    "content": json.dumps({
-                                        "warning": f"LOW CONFIDENCE ({confidence.score:.2f}): {confidence.reasoning}",
-                                        "action_required": "This tool call has low confidence. The tool was NOT executed. Please reconsider or provide more context before retrying.",
-                                        "tool_name": fn_name,
-                                        "blocked": True,
-                                    }),
-                                    "tool_call_id": tc.id,
-                                })
-                                continue  # Skip execution — let LLM reconsider
-                            elif confidence.level == ConfidenceLevel.MEDIUM:
-                                logger.info(
-                                    f"  \u26a0\ufe0f Medium confidence ({confidence.score:.2f}): {confidence.reasoning}"
-                                )
-                                # Proceed with execution
-
-                            try:
-                                # Set workdir for command/file tools
-                                if fn_name == "run_command" and "workdir" not in args:
-                                    args["workdir"] = str(project_dir)
-                                if fn_name == "read_write_file":
-                                    # Ensure paths are relative to project dir
-                                    if "path" in args and not os.path.isabs(args["path"]):
-                                        args["path"] = str(project_dir / args["path"])
-
-                                if self._event_log:
-                                    self._event_log.emit_tool_use(
-                                        agent_name="orchestrator",
-                                        tool_name=fn_name,
-                                        args=args,
-                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                                    )
-
-                                _tool_start = time.time()
-                                output = await tool.run(**args)
-                                _tool_duration = (time.time() - _tool_start) * 1000
-                                logger.info(f"  🔧 {fn_name}: {str(output)[:80]}")
-
-                                if self._event_log:
-                                    self._event_log.emit_tool_result(
-                                        agent_name="orchestrator", tool_name=fn_name, success=True,
-                                        output_preview=str(output)[:200], duration_ms=_tool_duration,
-                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                                    )
-
-                                # Track files created during the loop (not just at end)
-                                if fn_name == "read_write_file" and "path" in args:
-                                    rel = os.path.relpath(args["path"], str(project_dir))
-                                    if rel not in files_created and not rel.startswith(".."):
-                                        files_created.append(rel)
-                                        phase_enforcer.record_file_created(rel)
-
-                                phase_enforcer.record_tool_use(fn_name)
-                                if fn_name == "run_command":
-                                    phase_enforcer.record_command_output(
-                                        args.get("command", ""), str(output)
-                                    )
-
-                                conversation.append({
-                                    "role": "tool",
-                                    "content": str(output)[:5000],
-                                    "tool_call_id": tc.id,
-                                })
-                                # Semantic tagging for tool results
-                                if fn_name in ("web_search", "browse_web"):
-                                    semantic_budget.tag_message(conversation[-1], "research")
-                                elif fn_name == "read_write_file" and args.get("action") == "write" and any(
-                                    kw in str(args.get("path", "")).lower() for kw in ("spec", "plan", "design", "architecture")
-                                ):
-                                    semantic_budget.tag_message(conversation[-1], "spec")
-                                else:
-                                    semantic_budget.tag_message(conversation[-1], "tool_results")
-                            except Exception as e:
-                                logger.warning(f"  ❌ {fn_name} error: {e}")
-                                if self._event_log:
-                                    self._event_log.emit_tool_result(
-                                        agent_name="orchestrator", tool_name=fn_name, success=False,
-                                        output_preview=str(e)[:200], duration_ms=(time.time() - _tool_start) * 1000,
-                                        trace_id=self._trace_ctx.trace_id if self._trace_ctx else "",
-                                    )
-                                conversation.append({
-                                    "role": "tool",
-                                    "content": f"Error: {e}",
-                                    "tool_call_id": tc.id,
-                                })
-                                semantic_budget.tag_message(conversation[-1], "tool_results")
+                            }
+                            conversation.append(msg)
+                            semantic_budget.tag_message(msg, "tool_results")
                         else:
-                            conversation.append({
-                                "role": "tool",
-                                "content": f"Unknown tool: {fn_name}",
-                                "tool_call_id": tc.id,
-                            })
-                            semantic_budget.tag_message(conversation[-1], "tool_results")
+                            tag = result.pop("_semantic_tag", "tool_results")
+                            conversation.append(result)
+                            if tag:
+                                semantic_budget.tag_message(result, tag)
 
                     continue  # Loop back for more thinking
 

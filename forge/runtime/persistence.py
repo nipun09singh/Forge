@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Retry settings for transient SQLite failures (e.g. database locked)
+_MAX_RETRIES = 3
+_RETRY_DELAY = 0.1  # seconds, doubles each retry
 
 
 class MemoryBackend(ABC):
@@ -45,6 +50,14 @@ class MemoryBackend(ABC):
     def clear(self, session_id: str = "") -> None:
         """Clear all memory entries."""
         ...
+
+    def keys(self) -> list[str]:
+        """Return all stored keys. Override in subclasses for efficiency."""
+        return []
+
+    def count(self) -> int:
+        """Return the total number of stored entries."""
+        return len(self.keys())
 
 
 class InMemoryBackend(MemoryBackend):
@@ -109,6 +122,12 @@ class InMemoryBackend(MemoryBackend):
             self._store.clear()
             self._history.clear()
 
+    def keys(self) -> list[str]:
+        return list(self._store.keys())
+
+    def count(self) -> int:
+        return len(self._store)
+
 
 class SQLiteMemoryBackend(MemoryBackend):
     """
@@ -120,13 +139,32 @@ class SQLiteMemoryBackend(MemoryBackend):
 
     def __init__(self, db_path: str = "agency_memory.db") -> None:
         self.db_path = db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn: sqlite3.Connection | None = None
+        self._connect()
         self._init_schema()
         logger.info(f"SQLite memory initialized at {db_path}")
 
+    def _connect(self) -> None:
+        """Open (or reopen) the SQLite connection."""
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+
+    def _ensure_connection(self) -> sqlite3.Connection:
+        """Return a usable connection, reconnecting if necessary."""
+        if self._conn is None:
+            self._connect()
+        try:
+            assert self._conn is not None
+            self._conn.execute("SELECT 1")
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError):
+            logger.warning("SQLite connection lost, reconnecting…")
+            self._connect()
+        assert self._conn is not None
+        return self._conn
+
     def _init_schema(self) -> None:
-        self._conn.executescript("""
+        conn = self._ensure_connection()
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,
                 key TEXT NOT NULL,
@@ -142,31 +180,55 @@ class SQLiteMemoryBackend(MemoryBackend):
             CREATE INDEX IF NOT EXISTS idx_memories_author ON memories(author);
             CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
         """)
-        self._conn.commit()
+        conn.commit()
+
+    def _execute_with_retry(self, operation: str, func):
+        """Execute *func(conn)* with retry logic for transient SQLite errors."""
+        last_exc: Exception | None = None
+        delay = _RETRY_DELAY
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                conn = self._ensure_connection()
+                return func(conn)
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if "locked" in str(exc).lower() and attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "SQLite %s attempt %d/%d failed (locked), retrying in %.2fs",
+                        operation, attempt, _MAX_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise
+        raise last_exc  # type: ignore[misc]  # pragma: no cover
 
     def store(self, key: str, value: Any, author: str = "", tags: list[str] | None = None, session_id: str = "") -> None:
         now = datetime.now(timezone.utc).isoformat()
         value_str = json.dumps(value, default=str) if not isinstance(value, str) else value
         tags_str = json.dumps(tags or [])
+        row_id = f"{session_id}:{key}" if session_id else key
 
-        # Upsert
-        self._conn.execute("""
-            INSERT INTO memories (id, key, value, author, tags, session_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                value = excluded.value,
-                author = excluded.author,
-                tags = excluded.tags,
-                updated_at = excluded.updated_at
-        """, (f"{session_id}:{key}" if session_id else key, key, value_str, author, tags_str, session_id, now, now))
-        self._conn.commit()
+        def _do_store(conn: sqlite3.Connection):
+            conn.execute("""
+                INSERT INTO memories (id, key, value, author, tags, session_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    value = excluded.value,
+                    author = excluded.author,
+                    tags = excluded.tags,
+                    updated_at = excluded.updated_at
+            """, (row_id, key, value_str, author, tags_str, session_id, now, now))
+            conn.commit()
+
+        self._execute_with_retry("store", _do_store)
 
     def recall(self, key: str, session_id: str = "") -> Any | None:
+        conn = self._ensure_connection()
         row_id = f"{session_id}:{key}" if session_id else key
-        row = self._conn.execute("SELECT value FROM memories WHERE id = ?", (row_id,)).fetchone()
+        row = conn.execute("SELECT value FROM memories WHERE id = ?", (row_id,)).fetchone()
         if not row:
-            # Fallback: search by key without session prefix
-            row = self._conn.execute("SELECT value FROM memories WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)).fetchone()
+            row = conn.execute("SELECT value FROM memories WHERE key = ? ORDER BY updated_at DESC LIMIT 1", (key,)).fetchone()
         if row:
             try:
                 return json.loads(row["value"])
@@ -175,6 +237,7 @@ class SQLiteMemoryBackend(MemoryBackend):
         return None
 
     def search(self, tag: str | None = None, author: str | None = None, keyword: str | None = None, session_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        conn = self._ensure_connection()
         query = "SELECT * FROM memories WHERE 1=1"
         params: list[Any] = []
 
@@ -194,34 +257,37 @@ class SQLiteMemoryBackend(MemoryBackend):
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(limit)
 
-        rows = self._conn.execute(query, params).fetchall()
+        rows = conn.execute(query, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def list_recent(self, limit: int = 20, session_id: str = "") -> list[dict[str, Any]]:
+        conn = self._ensure_connection()
         if session_id:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM memories WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def delete(self, key: str, session_id: str = "") -> bool:
+        conn = self._ensure_connection()
         row_id = f"{session_id}:{key}" if session_id else key
-        cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (row_id,))
-        self._conn.commit()
+        cursor = conn.execute("DELETE FROM memories WHERE id = ?", (row_id,))
+        conn.commit()
         return cursor.rowcount > 0
 
     def clear(self, session_id: str = "") -> None:
+        conn = self._ensure_connection()
         if session_id:
-            self._conn.execute("DELETE FROM memories WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM memories WHERE session_id = ?", (session_id,))
         else:
-            self._conn.execute("DELETE FROM memories")
-        self._conn.commit()
+            conn.execute("DELETE FROM memories")
+        conn.commit()
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
@@ -235,6 +301,18 @@ class SQLiteMemoryBackend(MemoryBackend):
             pass
         return d
 
+    def keys(self) -> list[str]:
+        conn = self._ensure_connection()
+        rows = conn.execute("SELECT DISTINCT key FROM memories").fetchall()
+        return [r["key"] for r in rows]
+
+    def count(self) -> int:
+        conn = self._ensure_connection()
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM memories").fetchone()
+        return row["cnt"] if row else 0
+
     def close(self) -> None:
         """Close the SQLite database connection."""
-        self._conn.close()
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None

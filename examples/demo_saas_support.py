@@ -140,6 +140,7 @@ def build_demo_agency() -> tuple[Agency, EventLog]:
             "You are a Billing Support Specialist. You handle billing inquiries, "
             "plan changes, refund requests, and payment issues. "
             "You can look up customer accounts and check their billing history. "
+            # NOTE: This refund policy is example-specific for this demo.
             "Be empathetic but follow the refund policy: refunds within 30 days of charge."
         ),
         tools=[lookup_customer_tool, check_ticket_tool],
@@ -239,6 +240,7 @@ async def run_demo():
     print(f"📐 Planner: Enabled")
 
     # Store some context in persistent memory
+    # NOTE: These policies are example-specific for this demo — replace with your own.
     agency.memory.store("company_name", "AcmeSaaS Inc.", author="system", tags=["config"])
     agency.memory.store("refund_policy", "Full refund within 30 days. Pro-rated after 30 days.", author="system", tags=["policy"])
     agency.memory.store("escalation_threshold", "2 hours without resolution → escalate to engineering", author="system", tags=["policy"])

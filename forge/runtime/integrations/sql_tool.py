@@ -16,7 +16,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DB_PATH = "./data/agency.db"
-_sanitizer = SqlSanitizer()
+# Allow CREATE TABLE for the sql_tool (needed for schema setup)
+# but keep DROP/ALTER/TRUNCATE blocked
+_sanitizer = SqlSanitizer(
+    allowed_query_types={"SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE"},
+    blocked_statements={"DROP", "ALTER", "TRUNCATE", "EXEC", "EXECUTE",
+                        "GRANT", "REVOKE", "ATTACH", "DETACH", "PRAGMA", "VACUUM",
+                        "RENAME"},
+)
 
 
 async def query_database(query: str, db_path: str = "") -> str:

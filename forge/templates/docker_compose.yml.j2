@@ -12,7 +12,7 @@ services:
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
       - FORGE_MODEL=${FORGE_MODEL:-{{ model }}}
       {% for key, val in env_vars.items() %}
-      - {{ key }}=${{'{'}}{{ key }}:-{{ val }}{{'}'}}
+      - {{ key }}={{ '${' }}{{ key }}:-{{ val }}{{ '}' }}
       {% endfor %}
     volumes:
       - forge_data:/app/data

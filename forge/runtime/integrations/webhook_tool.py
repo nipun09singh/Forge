@@ -11,6 +11,11 @@ from forge.runtime.tools import Tool, ToolParameter
 
 async def send_webhook(url: str, payload: str, method: str = "POST") -> str:
     """Send a webhook (HTTP POST/PUT with JSON payload) to an external URL."""
+    from forge.runtime.integrations.rate_limiter import get_webhook_limiter, rate_limit_error
+    limiter = get_webhook_limiter()
+    if not limiter.acquire("webhook"):
+        return rate_limit_error("send_webhook", limiter, "webhook")
+
     # SSRF protection: reuse http_tool's URL validation
     try:
         from forge.runtime.integrations.http_tool import _is_url_safe

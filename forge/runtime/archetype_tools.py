@@ -39,12 +39,45 @@ def set_shared_infrastructure(memory=None, perf_tracker=None, cost_tracker=None,
 # ═══════════════════════════════════════════════════════════
 
 async def score_output(output_text: str, criteria: str = "", context: str = "") -> str:
-    """Score an output on accuracy, completeness, clarity, and usefulness."""
-    scores = {
-        "length_score": min(len(output_text) / 200, 1.0),  # Longer = more complete (heuristic)
-        "has_structure": 1.0 if any(c in output_text for c in ["\n", "-", "1.", "•"]) else 0.5,
-        "not_empty": 1.0 if len(output_text.strip()) > 10 else 0.0,
-    }
+    """Score an output on relevance, actionability, completeness, and structure."""
+    import re as _re
+
+    text = output_text.strip()
+    scores: dict[str, float] = {}
+
+    # Not empty
+    scores["not_empty"] = 1.0 if len(text) > 0 else 0.0
+
+    # Relevance: does output reference the task/query context?
+    if context:
+        ctx_words = set(_re.findall(r"\b\w{4,}\b", context.lower()))
+        out_words = set(_re.findall(r"\b\w{4,}\b", text.lower()))
+        overlap = len(ctx_words & out_words)
+        scores["relevance"] = min(overlap / max(len(ctx_words) * 0.3, 1), 1.0)
+    else:
+        scores["relevance"] = 0.7  # neutral when no context provided
+
+    # Actionability: contains specific next steps or recommendations
+    action_patterns = _re.compile(
+        r"\b(should|recommend|next step|action item|suggest|consider|implement|execute|proceed|ensure)\b",
+        _re.IGNORECASE,
+    )
+    action_matches = len(action_patterns.findall(text))
+    scores["actionability"] = min(action_matches / 3, 1.0) if action_matches else 0.3
+
+    # Structure: actual sections, headings, or organized lists
+    has_headings = bool(_re.search(r"^#+\s|\n#+\s|^[A-Z][A-Za-z ]+:\s*\n", text, _re.MULTILINE))
+    has_lists = bool(_re.search(r"^[\s]*[-•*]\s|^\s*\d+\.\s", text, _re.MULTILINE))
+    has_paragraphs = text.count("\n\n") >= 1
+    structure_score = 0.0
+    if has_headings:
+        structure_score += 0.4
+    if has_lists:
+        structure_score += 0.4
+    if has_paragraphs:
+        structure_score += 0.2
+    scores["structure"] = min(structure_score, 1.0) if len(text) > 50 else (0.6 if text else 0.0)
+
     overall = sum(scores.values()) / len(scores)
     verdict = "PASS" if overall >= 0.7 else "NEEDS_REVISION" if overall >= 0.4 else "REJECT"
     return json.dumps({
@@ -270,16 +303,53 @@ async def get_customer_health(customer_id: str) -> str:
 
 
 async def score_lead(lead_data: str) -> str:
-    """Score a lead on fit, intent, and budget."""
+    """Score a lead on fit, intent, and budget based on actual field analysis."""
     try:
         data = json.loads(lead_data)
     except json.JSONDecodeError:
         data = {"raw": lead_data}
 
-    fit = 50
-    intent = 30
-    budget = 20
-    total = fit + intent + budget
+    # Fit: does the lead have required contact fields?
+    fit = 0
+    if data.get("name"):
+        fit += 30
+    if data.get("email") or data.get("phone"):
+        fit += 30
+    if data.get("need") or data.get("company") or data.get("industry"):
+        fit += 40
+
+    # Intent: urgency indicators and specific requests
+    intent = 0
+    urgency = str(data.get("urgency", data.get("timeline", ""))).lower()
+    if urgency in ("high", "urgent", "asap", "immediate"):
+        intent += 50
+    elif urgency in ("medium", "soon", "this quarter"):
+        intent += 30
+    elif urgency:
+        intent += 15
+    request = data.get("request") or data.get("need") or data.get("message") or ""
+    if len(str(request)) > 20:
+        intent += 30
+    elif request:
+        intent += 15
+    if data.get("demo_requested") or data.get("meeting_requested"):
+        intent += 20
+    intent = min(intent, 100)
+
+    # Budget: actual budget field if present
+    budget = 0
+    budget_val = data.get("budget") or data.get("budget_range") or ""
+    if budget_val:
+        budget_str = str(budget_val).lower()
+        if any(ind in budget_str for ind in ("$", "k", "usd", "eur")) or budget_str.replace(",", "").replace(".", "").isdigit():
+            budget += 60
+        else:
+            budget += 30
+    if data.get("payment_method") or data.get("billing"):
+        budget += 40
+    budget = min(budget, 100)
+
+    total = round(fit * 0.4 + intent * 0.35 + budget * 0.25)
     qualification = "SQL" if total > 70 else "MQL" if total > 40 else "Unqualified"
 
     return json.dumps({

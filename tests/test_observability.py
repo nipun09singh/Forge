@@ -1,8 +1,10 @@
 """Tests for forge.runtime.observability"""
 
+import asyncio
 import json
 import os
 import tempfile
+import threading
 import pytest
 from forge.runtime.observability import (
     EventLog, Event, EventType, TraceContext, CostTracker,
@@ -71,6 +73,88 @@ class TestTraceContext:
         parent = TraceContext()
         child = parent.child()
         assert child.trace_id == parent.trace_id
+
+    def test_concurrent_span_operations(self):
+        """Multiple threads creating and ending spans simultaneously."""
+        ctx = TraceContext()
+        num_threads = 20
+        spans_per_thread = 50
+        all_spans: list[list[str]] = [[] for _ in range(num_threads)]
+        barrier = threading.Barrier(num_threads)
+
+        def worker(idx: int):
+            barrier.wait()
+            for _ in range(spans_per_thread):
+                span = ctx.new_span()
+                all_spans[idx].append(span)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Every created span should be unique
+        flat = [s for group in all_spans for s in group]
+        assert len(flat) == num_threads * spans_per_thread
+        assert len(set(flat)) == len(flat), "Duplicate span IDs detected"
+
+        # Stack should contain exactly all spans
+        ended: list[str] = []
+        while True:
+            s = ctx.end_span()
+            if s is None:
+                break
+            ended.append(s)
+        assert len(ended) == num_threads * spans_per_thread
+
+    def test_concurrent_end_span_no_error(self):
+        """Concurrent end_span calls never raise or return wrong values."""
+        ctx = TraceContext()
+        total_spans = 200
+        for _ in range(total_spans):
+            ctx.new_span()
+
+        results: list[str | None] = [None] * total_spans
+        barrier = threading.Barrier(4)
+
+        def popper(start: int, count: int):
+            barrier.wait()
+            for i in range(count):
+                results[start + i] = ctx.end_span()
+
+        per_thread = total_spans // 4
+        threads = [
+            threading.Thread(target=popper, args=(i * per_thread, per_thread))
+            for i in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        non_none = [r for r in results if r is not None]
+        assert len(non_none) == total_spans
+        assert len(set(non_none)) == total_spans, "Same span returned twice"
+
+    @pytest.mark.asyncio
+    async def test_async_concurrent_span_operations(self):
+        """Multiple async tasks creating spans on a shared TraceContext."""
+        ctx = TraceContext()
+        tasks_count = 10
+        spans_per_task = 30
+
+        async def worker():
+            spans = []
+            for _ in range(spans_per_task):
+                spans.append(ctx.new_span())
+                await asyncio.sleep(0)  # yield control
+            return spans
+
+        results = await asyncio.gather(*(worker() for _ in range(tasks_count)))
+        flat = [s for group in results for s in group]
+        assert len(flat) == tasks_count * spans_per_task
+        assert len(set(flat)) == len(flat)
 
 
 class TestCostTracker:

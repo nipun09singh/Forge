@@ -109,11 +109,6 @@ class ConfidenceScorer:
 
         reasons: list[str] = []
 
-        # Very short output is suspicious
-        if len(output.strip()) < 20:
-            score = min(score, 0.3)
-            reasons.append("output is very short")
-
         # Empty output
         if not output.strip():
             return ConfidenceScore(
@@ -122,6 +117,24 @@ class ConfidenceScorer:
                 reasoning="output is empty",
                 action="pause",
             )
+
+        stripped = output.strip()
+
+        # Check if output is responsive to the task rather than penalizing by length
+        if task:
+            task_words = set(w.lower() for w in re.findall(r"\b\w{4,}\b", task))
+            out_words = set(w.lower() for w in re.findall(r"\b\w{4,}\b", stripped))
+            overlap = len(task_words & out_words)
+            if overlap == 0 and len(task_words) > 0:
+                score = min(score, 0.4)
+                reasons.append("output does not reference the task")
+            elif len(stripped) < 20 and overlap == 0:
+                score = min(score, 0.3)
+                reasons.append("very short output with no task relevance")
+        elif len(stripped) < 20:
+            # No task context available — short output is suspicious but not fatal
+            score = min(score, 0.5)
+            reasons.append("output is very short (no task context to validate)")
 
         # Hedging language detection
         hedging_matches = HEDGING_PATTERNS.findall(output)

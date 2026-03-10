@@ -217,20 +217,20 @@ class SemanticBudget:
 
     def __init__(self, model: str = "gpt-4o", categories: dict | None = None):
         self.categories = categories or {k: ContextCategory(v.name, v.budget_tokens, v.pinned, v.priority) for k, v in self.DEFAULT_CATEGORIES.items()}
-        self._tagged_messages: list[tuple[dict, str]] = []  # (message, category_name)
         self._counter = TokenCounter(model=model)
 
-    def tag_message(self, message: dict, category: str) -> None:
-        """Tag a message with its semantic category."""
+    def tag_message(self, message: dict, category: str) -> dict:
+        """Tag a message with its semantic category by embedding it in the dict."""
         if category not in self.categories:
-            category = "conversation"  # fallback
-        self._tagged_messages.append((message, category))
+            category = "conversation"
+        message["_semantic_category"] = category
+        return message
 
-    def get_budget_status(self) -> dict[str, dict]:
+    def get_budget_status(self, conversation: list[dict]) -> dict[str, dict]:
         """Return per-category token usage vs budget."""
         usage = {}
         for cat_name, cat in self.categories.items():
-            cat_messages = [m for m, c in self._tagged_messages if c == cat_name]
+            cat_messages = [m for m in conversation if self._get_category(0, m) == cat_name]
             tokens = sum(self._counter.count_message_tokens([m]) for m in cat_messages)
             usage[cat_name] = {"used": tokens, "budget": cat.budget_tokens, "pinned": cat.pinned, "priority": cat.priority}
         return usage
@@ -290,10 +290,11 @@ class SemanticBudget:
         return [msg for i, msg in enumerate(conversation) if i not in indices_to_remove]
 
     def _get_category(self, index: int, msg: dict) -> str:
-        """Determine category from message content/role."""
-        if index < len(self._tagged_messages):
-            return self._tagged_messages[index][1]
-
+        """Get category from message's embedded tag."""
+        cat = msg.get("_semantic_category", "")
+        if cat and cat in self.categories:
+            return cat
+        # Fallback: infer from role
         role = msg.get("role", "")
         if role == "system":
             return "system"

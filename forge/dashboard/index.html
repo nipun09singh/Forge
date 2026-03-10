@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
     <title>Forge — AI Agency Dashboard</title>
     <style>
         :root {
@@ -230,6 +231,16 @@
         let taskCount = 0;
         let eventSource = null;
 
+        function escapeHtml(str) {
+            if (str == null) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         // Check connection
         async function checkConnection() {
             try {
@@ -249,7 +260,7 @@
 
         function updateAgents(data) {
             const panel = document.getElementById('agents-panel');
-            let html = '';
+            panel.innerHTML = '';
             const teams = data.teams || {};
             let agentCount = 0;
             for (const [teamName, team] of Object.entries(teams)) {
@@ -257,16 +268,28 @@
                 for (const agent of agents) {
                     agentCount++;
                     const status = agent.status || 'idle';
-                    html += `<div class="agent-item">
-                        <div>
-                            <div class="agent-name">${agent.name}</div>
-                            <div class="agent-role">${agent.role || teamName}</div>
-                        </div>
-                        <span class="agent-status ${status}">${status}</span>
-                    </div>`;
+                    const item = document.createElement('div');
+                    item.className = 'agent-item';
+                    const info = document.createElement('div');
+                    const name = document.createElement('div');
+                    name.className = 'agent-name';
+                    name.textContent = agent.name;
+                    const role = document.createElement('div');
+                    role.className = 'agent-role';
+                    role.textContent = agent.role || teamName;
+                    info.appendChild(name);
+                    info.appendChild(role);
+                    const statusEl = document.createElement('span');
+                    statusEl.className = `agent-status ${escapeHtml(status)}`;
+                    statusEl.textContent = status;
+                    item.appendChild(info);
+                    item.appendChild(statusEl);
+                    panel.appendChild(item);
                 }
             }
-            panel.innerHTML = html || '<div style="color: var(--text-dim); font-size: 12px; padding: 8px;">No agents loaded</div>';
+            if (agentCount === 0) {
+                panel.innerHTML = '<div style="color: var(--text-dim); font-size: 12px; padding: 8px;">No agents loaded</div>';
+            }
             document.getElementById('metric-agents').textContent = agentCount;
         }
 
@@ -306,11 +329,18 @@
 
             const div = document.createElement('div');
             div.className = 'event-item';
-            div.innerHTML = `
-                <span class="event-time">${time}</span>
-                <span class="event-type ${typeCss}">${type}</span>
-                <span class="event-detail">${detail}</span>
-            `;
+            const timeEl = document.createElement('span');
+            timeEl.className = 'event-time';
+            timeEl.textContent = time;
+            const typeEl = document.createElement('span');
+            typeEl.className = `event-type ${typeCss}`;
+            typeEl.textContent = type;
+            const detailEl = document.createElement('span');
+            detailEl.className = 'event-detail';
+            detailEl.textContent = detail;
+            div.appendChild(timeEl);
+            div.appendChild(typeEl);
+            div.appendChild(detailEl);
             panel.prepend(div);
             // Keep max 100 events
             while (panel.children.length > 100) panel.removeChild(panel.lastChild);
@@ -352,12 +382,16 @@
                                 try {
                                     const data = JSON.parse(line.slice(6));
                                     if (data.chunk) {
-                                        output.innerHTML += `<span class="chunk">${data.chunk}</span>`;
+                                        const span = document.createElement('span');
+                                        span.className = 'chunk';
+                                        span.textContent = data.chunk;
+                                        output.appendChild(span);
                                     } else if (data.result) {
-                                        output.innerHTML += `\n\n✅ ${data.result}`;
+                                        output.appendChild(document.createTextNode('\n\n✅ '));
+                                        output.appendChild(document.createTextNode(data.result));
                                     }
                                 } catch(e) {
-                                    output.innerHTML += line.slice(6);
+                                    output.appendChild(document.createTextNode(line.slice(6)));
                                 }
                             }
                         }
@@ -366,10 +400,18 @@
                 } else {
                     // Fallback to regular POST
                     const data = await resp.json();
-                    output.innerHTML = `<span class="chunk">${data.output || data.result || JSON.stringify(data, null, 2)}</span>`;
+                    output.innerHTML = '';
+                    const span = document.createElement('span');
+                    span.className = 'chunk';
+                    span.textContent = data.output || data.result || JSON.stringify(data, null, 2);
+                    output.appendChild(span);
                 }
             } catch(e) {
-                output.innerHTML = `<span style="color: var(--red);">Error: ${e.message}\n\nMake sure the agency API is running.</span>`;
+                output.innerHTML = '';
+                const errSpan = document.createElement('span');
+                errSpan.style.color = 'var(--red)';
+                errSpan.textContent = `Error: ${e.message}\n\nMake sure the agency API is running.`;
+                output.appendChild(errSpan);
             }
 
             btn.disabled = false;

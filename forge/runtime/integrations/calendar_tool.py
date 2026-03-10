@@ -92,15 +92,25 @@ async def _calendar_action(action: str, title: str = "", date: str = "",
 
         return json.dumps({"success": False, "error": f"Unknown action: {action}"})
 
-    # Real Google Calendar API would go here
-    return json.dumps({"success": False, "error": "Real Google Calendar API not yet implemented. Set up mock mode."})
+    # Real Google Calendar API is not yet implemented.
+    # To use calendar features, enable mock mode via MOCK_MODE=true or MOCK_INTEGRATIONS=true.
+    return json.dumps({
+        "success": False,
+        "error": (
+            "Google Calendar API integration is not yet implemented. "
+            "To use calendar features now, enable mock mode by setting "
+            "MOCK_MODE=true or MOCK_INTEGRATIONS=true in your environment. "
+            "For production use, a full OAuth2-based Google Calendar integration "
+            "is planned for a future release."
+        ),
+    })
 
 
 def create_calendar_tool() -> Tool:
     """Create the Google Calendar tool."""
     return Tool(
         name="calendar",
-        description="Manage calendar events. Supports: create_event, list_events, delete_event, check_availability. Requires GOOGLE_CALENDAR_API_KEY or explicit MOCK_MODE=true.",
+        description="Manage calendar events (mock-only). Supports: create_event, list_events, delete_event, check_availability. Requires MOCK_MODE=true or MOCK_INTEGRATIONS=true. Real Google Calendar API is not yet implemented.",
         parameters=[
             ToolParameter(name="action", type="string", description="Action: create_event, list_events, delete_event, check_availability", required=True),
             ToolParameter(name="title", type="string", description="Event title (for create_event)", required=False),

@@ -5,9 +5,22 @@ from forge.core.blueprint import (
     ToolBlueprint, WorkflowBlueprint, WorkflowStep, APIEndpoint,
 )
 
+# Default SaaS policies — override via create_saas_support_blueprint(policies={...})
+DEFAULT_POLICIES: dict[str, str] = {
+    "refund": "Full refund within 30 days, pro-rated after.",
+}
 
-def create_saas_support_blueprint() -> AgencyBlueprint:
-    """Create a pre-built SaaS customer support agency blueprint."""
+
+def create_saas_support_blueprint(
+    policies: dict[str, str] | None = None,
+) -> AgencyBlueprint:
+    """Create a pre-built SaaS customer support agency blueprint.
+
+    Args:
+        policies: Optional dict of policy overrides. Keys: "refund", etc.
+                  Falls back to DEFAULT_POLICIES for any missing key.
+    """
+    active_policies = {**DEFAULT_POLICIES, **(policies or {})}
 
     # ─── Agents ───
     support_lead = AgentBlueprint(
@@ -54,7 +67,7 @@ def create_saas_support_blueprint() -> AgencyBlueprint:
         title="Billing & Account Specialist",
         system_prompt=(
             "You handle billing inquiries, plan changes, refund requests, and payment issues. "
-            "Refund policy: full refund within 30 days, pro-rated after. "
+            f"Refund policy: {active_policies['refund']} "
             "You can look up customer accounts, process plan changes, and issue credits. "
             "Always verify customer identity before making account changes."
         ),

@@ -14,11 +14,12 @@ services:
       - FORGE_MODEL=${FORGE_MODEL:-gpt-4}
       - FORGE_LOG_LEVEL=${FORGE_LOG_LEVEL:-INFO}
       - FORGE_JSON_LOGS=true
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:8080,http://localhost:8000}
     volumes:
       - demo-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

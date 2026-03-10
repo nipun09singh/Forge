@@ -5,9 +5,22 @@ from forge.core.blueprint import (
     ToolBlueprint, WorkflowBlueprint, WorkflowStep, APIEndpoint,
 )
 
+# Default e-commerce policies — override via create_ecommerce_blueprint(policies={...})
+DEFAULT_POLICIES: dict[str, str] = {
+    "return": "30 days for unused items, 14 days for electronics.",
+}
 
-def create_ecommerce_blueprint() -> AgencyBlueprint:
-    """Create a pre-built e-commerce operations agency blueprint."""
+
+def create_ecommerce_blueprint(
+    policies: dict[str, str] | None = None,
+) -> AgencyBlueprint:
+    """Create a pre-built e-commerce operations agency blueprint.
+
+    Args:
+        policies: Optional dict of policy overrides. Keys: "return", etc.
+                  Falls back to DEFAULT_POLICIES for any missing key.
+    """
+    active_policies = {**DEFAULT_POLICIES, **(policies or {})}
 
     order_agent = AgentBlueprint(
         name="Order Manager",
@@ -17,7 +30,7 @@ def create_ecommerce_blueprint() -> AgencyBlueprint:
             "You manage customer orders: tracking, modifications, cancellations, and returns. "
             "You can query the order database, check shipping status via API, and process refunds. "
             "Always confirm order details before making changes. "
-            "Return policy: 30 days for unused items, 14 days for electronics."
+            f"Return policy: {active_policies['return']}"
         ),
         capabilities=["Order tracking", "Order modifications", "Return processing", "Shipping status"],
         tools=[

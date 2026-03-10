@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 # Mapping from tool name to category (used by role-based defaults)
 TOOL_CATEGORY_MAP: dict[str, list[str]] = {
     "run_command": ["command"],
-    "read_write_file": ["file", "file_read"],
+    "read_write_file": ["file", "file_read", "file_write"],
     "http_request": ["http"],
     "web_search": ["search"],
     "browse_web": ["search"],
     "query_database": ["sql"],
-    "send_email": ["email", "communication"],
+    "send_email": ["email"],
     "send_webhook": ["http"],
     "git_operation": ["git"],
     "send_sms": ["communication"],
@@ -43,7 +43,7 @@ class ToolAccessPolicy:
     # Role → list of allowed tool *categories*.  "*" means unrestricted.
     ROLE_TOOL_DEFAULTS: dict[str, list[str]] = field(default_factory=lambda: {
         "support": ["search", "http", "email", "file_read"],
-        "developer": ["command", "file", "http", "search", "git", "sql"],
+        "developer": ["command", "file", "file_read", "file_write", "http", "search", "git", "sql"],
         "analyst": ["search", "http", "sql", "file_read"],
         "admin": ["*"],
         "default": ["search", "http", "file_read", "email"],
@@ -121,4 +121,5 @@ class ToolAccessPolicy:
             # Unknown tools are denied under role defaults
             return False
 
-        return bool(set(tool_cats) & set(categories))
+        # Tool is allowed only when ALL its categories are covered by the role
+        return set(tool_cats) <= set(categories)

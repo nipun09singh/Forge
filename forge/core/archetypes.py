@@ -699,20 +699,25 @@ STRATEGIC_PLANNER = AgentBlueprint(
 # All Universal Archetypes
 # =============================================================================
 
-UNIVERSAL_ARCHETYPES: list[AgentBlueprint] = [
-    # Strategic Planning
+# Core archetypes — always injected (quality, operations, planning)
+CORE_ARCHETYPES: list[AgentBlueprint] = [
     STRATEGIC_PLANNER,
-    # Quality & Operations
     QA_REVIEWER,
     INTAKE_COORDINATOR,
     SELF_IMPROVEMENT_AGENT,
     ANALYTICS_AGENT,
-    # Revenue & Growth
+]
+
+# Business archetypes — opt-in (revenue, growth, sales)
+BUSINESS_ARCHETYPES: list[AgentBlueprint] = [
     GROWTH_HACKER,
     CUSTOMER_SUCCESS_AGENT,
     LEAD_GENERATION_AGENT,
     REVENUE_OPTIMIZER,
 ]
+
+# Full list for backward compatibility
+UNIVERSAL_ARCHETYPES: list[AgentBlueprint] = CORE_ARCHETYPES + BUSINESS_ARCHETYPES
 
 
 # =============================================================================
@@ -760,23 +765,33 @@ REVENUE_GROWTH_WORKFLOW = WorkflowBlueprint(
 )
 
 
-def inject_archetypes(blueprint: AgencyBlueprint) -> AgencyBlueprint:
+def inject_archetypes(
+    blueprint: AgencyBlueprint,
+    include_business_archetypes: bool = False,
+) -> AgencyBlueprint:
     """
     Inject universal agent archetypes into an agency blueprint.
 
-    Adds mandatory agents (QA, Intake, Self-Improvement, Analytics) into a
-    dedicated 'Quality & Improvement' team, and revenue-driving agents
-    (Growth Hacker, Customer Success, Lead Generation, Revenue Optimizer)
-    into a 'Revenue & Growth' team, plus QA/improvement/revenue workflows.
+    Adds core agents (QA, Intake, Self-Improvement, Analytics, Strategic Planner)
+    into a dedicated 'Quality & Improvement' team, plus QA/improvement workflows.
+
+    When ``include_business_archetypes=True``, also injects revenue-driving agents
+    (Growth Hacker, Customer Success, Lead Generation, Revenue Optimizer) into a
+    'Revenue & Growth' team with the revenue growth workflow.
 
     This is called automatically by the ForgeEngine after domain-specific
-    blueprint generation, ensuring EVERY agency has these capabilities.
+    blueprint generation, ensuring EVERY agency has core capabilities.
     """
+    # Determine which archetypes to inject
+    archetypes_to_consider = list(CORE_ARCHETYPES)
+    if include_business_archetypes:
+        archetypes_to_consider += BUSINESS_ARCHETYPES
+
     # Check which archetypes are already present (avoid duplicates)
     existing_names = {a.name.lower() for a in blueprint.all_agents}
 
     agents_to_add = []
-    for archetype in UNIVERSAL_ARCHETYPES:
+    for archetype in archetypes_to_consider:
         if archetype.name.lower() not in existing_names:
             agents_to_add.append(archetype)
         else:
@@ -833,7 +848,7 @@ def inject_archetypes(blueprint: AgencyBlueprint) -> AgencyBlueprint:
         new_workflows.append(QA_WORKFLOW)
     if IMPROVEMENT_WORKFLOW.name.lower() not in existing_wf_names:
         new_workflows.append(IMPROVEMENT_WORKFLOW)
-    if REVENUE_GROWTH_WORKFLOW.name.lower() not in existing_wf_names:
+    if include_business_archetypes and REVENUE_GROWTH_WORKFLOW.name.lower() not in existing_wf_names:
         new_workflows.append(REVENUE_GROWTH_WORKFLOW)
     updated.workflows = new_workflows
 

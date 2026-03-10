@@ -12,6 +12,7 @@ from forge.runtime.planner import Planner
 from forge.runtime.observability import EventLog, TraceContext, CostTracker
 from forge.runtime.memory import SharedMemory
 from forge.runtime.integrations import BuiltinToolkit
+from forge.runtime.integrations.mock_backends import create_mock_tool_function
 
 # ─── Optional imports (graceful degradation) ──────────────
 try:
@@ -137,25 +138,29 @@ if _tools_dir.is_dir():
 
 {% for tool in shared_tools %}
 # --- Shared Tool: {{ tool.name }} ---
-{% if tool.name in ['http_request', 'send_email', 'query_database', 'read_write_file', 'send_webhook'] %}
+# Try real integration first (forge.runtime.integrations), fall back to mock
 {{ tool.name }}_tool = _builtin_tools.get("{{ tool.name }}")
-{% else %}
-async def {{ tool.name }}({{ tool.parameters | map(attribute='name') | join(', ') }}):
-    """{{ tool.description }}"""
-    # Implementation needed for: {{ tool.name }}
-    return f"{{ tool.name }} executed"
-
-{{ tool.name }}_tool = Tool(
-    name="{{ tool.name }}",
-    description="{{ tool.description }}",
-    parameters=[
-        {% for param in tool.parameters %}
-        ToolParameter(name="{{ param.name }}", type="{{ param.type }}", description="{{ param.description }}", required={{ param.required | default(true) }}),
-        {% endfor %}
-    ],
-    _fn={{ tool.name }},
-)
-{% endif %}
+if not {{ tool.name }}_tool:
+    # Mock-backed domain tool: returns realistic data via MockDataStore
+    _{{ tool.name }}_fn = create_mock_tool_function(
+        "{{ tool.name }}",
+        "{{ tool.description }}",
+        [
+            {% for param in tool.parameters %}
+            {"name": "{{ param.name }}", "type": "{{ param.type }}", "description": "{{ param.description }}", "required": {{ param.required | default(true) }}},
+            {% endfor %}
+        ],
+    )
+    {{ tool.name }}_tool = Tool(
+        name="{{ tool.name }}",
+        description="{{ tool.description }}",
+        parameters=[
+            {% for param in tool.parameters %}
+            ToolParameter(name="{{ param.name }}", type="{{ param.type }}", description="{{ param.description }}", required={{ param.required | default(true) }}),
+            {% endfor %}
+        ],
+        _fn=_{{ tool.name }}_fn,
+    )
 {% endfor %}
 
 
@@ -282,21 +287,25 @@ def build_agency() -> tuple[Agency, EventLog]:
                 agent.set_guardrails(guardrails)
             if model_router:
                 agent.set_model_router(model_router)
-            # Give ALL agents access to primitive tools (file, command, http, sql)
-            for prim_tool in _builtin_tools.values():
-                if prim_tool and prim_tool.name not in [t.name for t in agent.tool_registry.list_tools()]:
-                    agent.tool_registry.register(prim_tool)
-            # Apply role-appropriate primitives
-            if _has_primitives:
-                agent_config = configurator.configure(agent_name=agent.name, role=agent.role)
-                # Set critic based on domain configuration
-                if agent_config.critic_type == "compliance" and agent_config.compliance_rules:
-                    agent._critic = ComplianceCritic(rules=agent_config.compliance_rules)
-                elif agent_config.critic_type == "factual":
-                    agent._critic = FactualCritic()
-                elif agent_config.critic_type == "scored":
-                    agent._critic = ScoredCritic(min_score=agent_config.critic_min_score)
-                elif agent_config.critic_type == "binary":
+            # Scoped tool access: leads/orchestrators get all tools; regular agents
+            # keep only their blueprint-assigned tools plus a small universal set.
+            _UNIVERSAL_TOOLS = {"web_search", "http_request"}
+            if agent is team.lead:
+                for prim_tool in _builtin_tools.values():
+                    if prim_tool and prim_tool.name not in [t.name for t in agent.tool_registry.list_tools()]:
+                        agent.tool_registry.register(prim_tool)
+            else:
+                for tool_name in _UNIVERSAL_TOOLS:
+                    _utool = _builtin_tools.get(tool_name)
+                    if _utool and _utool.name not in [t.name for t in agent.tool_registry.list_tools()]:
+                        agent.tool_registry.register(_utool)
+            # Apply domain-aware critic based on available knowledge
+            if _has_primitives and domain_knowledge:
+                if domain_knowledge.compliance_rules:
+                    agent._critic = ComplianceCritic(rules=domain_knowledge.compliance_rules)
+                elif domain_knowledge.quality_criteria:
+                    agent._critic = ScoredCritic(min_score=0.7)
+                else:
                     agent._critic = BinaryCritic()
 
     # ─── Initialize planner───────────────────────────────
@@ -328,11 +337,16 @@ def build_agency() -> tuple[Agency, EventLog]:
     # Seed initial data so APIs aren't empty on Day 1
     # ═══════════════════════════════════════════════════════════
     memory.store("company:name", "{{ agency_name }}", author="system", tags=["config"])
-    memory.store("policy:refund", "Full refund within 30 days. Pro-rated after.", author="system", tags=["policy"])
-    memory.store("policy:escalation", "Escalate to human after 2 failed resolution attempts.", author="system", tags=["policy"])
-    memory.store("policy:response_time", "First response within 5 minutes. Resolution within 24 hours.", author="system", tags=["policy", "sla"])
 
-    logger.info("Seeded initial policies and configuration")
+    # Seed policies from domain knowledge (if available) rather than hardcoding
+    if domain_knowledge and domain_knowledge.policies:
+        for idx, policy in enumerate(domain_knowledge.policies):
+            memory.store(f"policy:{domain_knowledge.domain}:{idx}", policy, author="system", tags=["policy"])
+        logger.info(f"Seeded {len(domain_knowledge.policies)} policies from domain knowledge")
+    else:
+        logger.info("No domain-specific policies to seed")
+
+    logger.info("Seeded initial configuration")
 
     return agency, event_log
 

@@ -70,4 +70,4 @@ class TestSQLTool:
         result = await query_database("DROP TABLE users", db_path=db)
         data = json.loads(result)
         assert "error" in data
-        assert "blocked" in data["error"].lower()
+        assert "blocked" in data["error"].lower() or "not allowed" in data["error"].lower()

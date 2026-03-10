@@ -109,12 +109,14 @@ class TestBuiltinToolsDirect:
     @pytest.mark.asyncio
     async def test_sql_tool(self):
         from forge.runtime.integrations.sql_tool import query_database
+        import gc
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "test.db")
             await query_database("CREATE TABLE t (id INTEGER, name TEXT)", db_path=db)
             await query_database("INSERT INTO t VALUES (1, 'Alice')", db_path=db)
             result = json.loads(await query_database("SELECT * FROM t", db_path=db))
             assert result["count"] == 1
+            gc.collect()  # Release SQLite connections on Windows
 
     @pytest.mark.asyncio
     async def test_sql_blocks_drop(self):

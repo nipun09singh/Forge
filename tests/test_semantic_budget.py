@@ -161,7 +161,7 @@ class TestSemanticBudgetStatus:
         sb.tag_message(user_msg, "conversation")
         sb.tag_message(tool_msg, "research")
 
-        status = sb.get_budget_status()
+        status = sb.get_budget_status([sys_msg, user_msg, tool_msg])
         assert "system" in status
         assert "conversation" in status
         assert "research" in status
@@ -176,7 +176,7 @@ class TestSemanticBudgetStatus:
     def test_budget_status_has_all_categories(self):
         """Status includes all default categories even if unused."""
         sb = SemanticBudget()
-        status = sb.get_budget_status()
+        status = sb.get_budget_status([])
         for cat in ("system", "research", "spec", "active_file", "conversation", "tool_results"):
             assert cat in status
             assert "used" in status[cat]
@@ -232,7 +232,7 @@ class TestSemanticBudgetFallbackCategory:
         msg = _make_msg("user", "test message")
         sb.tag_message(msg, "nonexistent_category")
         # Should have been stored with "conversation" category
-        assert sb._tagged_messages[-1][1] == "conversation"
+        assert msg["_semantic_category"] == "conversation"
 
 
 class TestSemanticBudgetIntegration:
@@ -279,3 +279,47 @@ class TestSemanticBudgetIntegration:
 
         # Pruning happened
         assert len(result) < len(msgs)
+
+
+class TestSemanticBudgetEmbeddedCategory:
+    """Category tag is embedded in the message dict, not a parallel list."""
+
+    def test_category_survives_pruning(self):
+        """After pruning, surviving messages still carry their _semantic_category tag."""
+        sb = SemanticBudget(model="gpt-3.5-turbo")
+        msgs = [_make_msg("system", "System prompt")]
+        sb.tag_message(msgs[0], "system")
+
+        research_msg = _make_msg("tool", "Important research")
+        msgs.append(research_msg)
+        sb.tag_message(research_msg, "research")
+
+        for i in range(200):
+            m = _make_msg("user", f"padding{i} " + "x " * 500)
+            msgs.append(m)
+            sb.tag_message(m, "conversation")
+
+        result = sb.prune_by_budget(msgs)
+        assert len(result) < len(msgs)
+        # Research message survives with its embedded category
+        for m in result:
+            if m.get("content") == "Important research":
+                assert m["_semantic_category"] == "research"
+                break
+        else:
+            pytest.fail("Research message was pruned (should be pinned)")
+
+    def test_get_category_reads_from_message(self):
+        """_get_category reads _semantic_category from the message dict."""
+        sb = SemanticBudget()
+        msg = _make_msg("user", "hello")
+        msg["_semantic_category"] = "research"
+        assert sb._get_category(0, msg) == "research"
+
+    def test_fallback_for_untagged_messages(self):
+        """Untagged messages fall back to role-based inference."""
+        sb = SemanticBudget()
+        assert sb._get_category(0, _make_msg("system", "sys")) == "system"
+        assert sb._get_category(0, _make_msg("tool", "out")) == "tool_results"
+        assert sb._get_category(0, _make_msg("user", "hi")) == "conversation"
+        assert sb._get_category(0, _make_msg("assistant", "hey")) == "conversation"

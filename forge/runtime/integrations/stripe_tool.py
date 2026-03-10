@@ -13,6 +13,7 @@ import logging
 import os
 import urllib.request
 import urllib.parse
+import uuid
 from typing import Any
 
 from forge.runtime.tools import Tool, ToolParameter
@@ -122,6 +123,9 @@ async def _stripe_action(action: str, amount: int = 0, currency: str = "usd",
 
         req = urllib.request.Request(url, data=data, method="POST" if data else "GET")
         req.add_header("Authorization", f"Bearer {api_key}")
+        if action in ("charge", "subscribe"):
+            idempotency_key = f"forge-{uuid.uuid4().hex}"
+            req.add_header("Idempotency-Key", idempotency_key)
 
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read().decode())

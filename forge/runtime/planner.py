@@ -17,6 +17,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class CyclicDependencyError(Exception):
+    """Raised when a circular dependency is detected among plan steps."""
+
+    def __init__(self, cycle: list[str]):
+        self.cycle = cycle
+        cycle_str = " → ".join(cycle)
+        super().__init__(f"Circular dependency detected: {cycle_str}")
+
+
 class StepStatus(str, Enum):
     """Status of a plan step."""
     PENDING = "pending"
@@ -80,7 +89,11 @@ class TaskPlan:
         return len(self.completed_steps) / len(self.steps)
 
     def get_ready_steps(self) -> list[PlanStep]:
-        """Get steps whose dependencies are all satisfied. Does NOT mutate step status."""
+        """Get steps whose dependencies are all satisfied. Does NOT mutate step status.
+
+        Raises CyclicDependencyError if no steps are ready but pending steps
+        remain and nothing is running (deadlock implies a cycle).
+        """
         completed_ids = {s.id for s in self.completed_steps}
         ready = []
         for step in self.steps:
@@ -89,7 +102,56 @@ class TaskPlan:
             deps_met = all(dep in completed_ids for dep in step.depends_on)
             if deps_met:
                 ready.append(step)
+
+        if not ready and self.pending_steps and not self.running_steps:
+            cycle = self._detect_cycles(self.pending_steps)
+            if cycle:
+                raise CyclicDependencyError(cycle)
+
         return ready
+
+    # ─── CYCLE DETECTION ─────────────────────────────────────
+
+    @staticmethod
+    def _detect_cycles(steps: list[PlanStep]) -> list[str] | None:
+        """Detect circular dependencies using DFS. Returns cycle path or None."""
+        graph: dict[str, list[str]] = {s.id: list(s.depends_on) for s in steps}
+        visited: set[str] = set()
+        rec_stack: set[str] = set()
+        path: list[str] = []
+
+        def dfs(node: str) -> bool:
+            visited.add(node)
+            rec_stack.add(node)
+            path.append(node)
+            for dep in graph.get(node, []):
+                if dep not in visited:
+                    if dfs(dep):
+                        return True
+                elif dep in rec_stack:
+                    path.append(dep)
+                    return True
+            path.pop()
+            rec_stack.discard(node)
+            return False
+
+        for step_id in graph:
+            if step_id not in visited:
+                if dfs(step_id):
+                    cycle_start = path[-1]
+                    idx = path.index(cycle_start)
+                    return path[idx:]
+        return None
+
+    def validate_dependencies(self) -> None:
+        """Validate that the plan has no circular dependencies.
+
+        Raises CyclicDependencyError if a cycle is found.
+        Can be called externally before execution.
+        """
+        cycle = self._detect_cycles(self.steps)
+        if cycle:
+            raise CyclicDependencyError(cycle)
 
     def mark_ready(self, step: PlanStep) -> None:
         """Mark a step as ready for execution."""
@@ -252,7 +314,10 @@ class Planner:
 
         Independent steps are run in parallel.
         Failed steps trigger re-planning.
+        Raises CyclicDependencyError if the plan contains circular dependencies.
         """
+        plan.validate_dependencies()
+
         plan.status = "executing"
         replan_count = 0
         consolidated_results: dict[str, Any] = {}

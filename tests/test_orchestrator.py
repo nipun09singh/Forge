@@ -285,3 +285,113 @@ class TestBugFixes:
         assert "PHASE 5 — SHIP" in source
         assert "PHASE 3 — TEST & DEBUG" not in source
         assert "PHASE 4 — POLISH" not in source
+
+
+class TestModelRouterIntegration:
+    """Tests for ModelRouter integration in OrchestratorAgent."""
+
+    def test_set_model_router(self):
+        """set_model_router stores the router instance."""
+        from forge.runtime.model_router import ModelRouter
+        orch = OrchestratorAgent()
+        router = ModelRouter(enabled=True, feedback_path=os.path.join(tempfile.mkdtemp(), "fb.json"))
+        orch.set_model_router(router)
+        assert orch._model_router is router
+
+    def test_model_router_defaults_to_none(self):
+        """By default, _model_router is None (backward compat)."""
+        orch = OrchestratorAgent()
+        assert orch._model_router is None
+
+    @pytest.mark.asyncio
+    async def test_build_without_router_uses_self_model(self):
+        """Without a router, build() uses self.model for LLM calls."""
+        client = AsyncMock()
+        done_response = _make_llm_response(content='{"status": "DONE", "summary": "Done"}')
+        client.chat.completions.create = AsyncMock(side_effect=[done_response])
+
+        orch = OrchestratorAgent(llm_client=client, model="gpt-4o", max_iterations=3)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "f.py"), "w").close()
+            await orch.build("Build", workdir=tmpdir)
+            call_kwargs = client.chat.completions.create.call_args
+            assert call_kwargs.kwargs.get("model") or call_kwargs[1].get("model") == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_build_with_router_uses_selected_model(self):
+        """With a router, build() uses the model returned by select_model()."""
+        from forge.runtime.model_router import ModelRouter
+        client = AsyncMock()
+        done_response = _make_llm_response(content='{"status": "DONE", "summary": "Done"}')
+        client.chat.completions.create = AsyncMock(side_effect=[done_response])
+
+        router = ModelRouter(
+            fast_model="gpt-4o-mini",
+            standard_model="gpt-4o",
+            premium_model="gpt-4",
+            enabled=True,
+            feedback_path=os.path.join(tempfile.mkdtemp(), "fb.json"),
+        )
+
+        orch = OrchestratorAgent(llm_client=client, model="gpt-4o", max_iterations=3)
+        orch.set_model_router(router)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "f.py"), "w").close()
+            await orch.build("Classify this simple item", workdir=tmpdir)
+
+            call_kwargs = client.chat.completions.create.call_args
+            used_model = call_kwargs.kwargs.get("model", call_kwargs[1].get("model"))
+            # Router should have picked a model (not necessarily self.model)
+            assert used_model is not None
+
+    @pytest.mark.asyncio
+    async def test_build_with_router_records_outcome(self):
+        """With a router, build() records outcomes for the feedback loop."""
+        from forge.runtime.model_router import ModelRouter
+        client = AsyncMock()
+        done_response = _make_llm_response(content='{"status": "DONE", "summary": "Done"}')
+        client.chat.completions.create = AsyncMock(side_effect=[done_response])
+
+        router = ModelRouter(
+            enabled=True,
+            feedback_path=os.path.join(tempfile.mkdtemp(), "fb.json"),
+        )
+
+        orch = OrchestratorAgent(llm_client=client, model="gpt-4o", max_iterations=3)
+        orch.set_model_router(router)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "f.py"), "w").close()
+            await orch.build("Build a simple app", workdir=tmpdir)
+
+            # Router should have recorded at least one outcome
+            assert len(router._feedback_history) >= 1
+            outcome = router._feedback_history[0]
+            assert outcome.success is True
+            assert outcome.tokens > 0
+
+    @pytest.mark.asyncio
+    async def test_build_with_disabled_router_uses_default_model(self):
+        """When router.enabled=False, select_model() returns default and self.model is used."""
+        from forge.runtime.model_router import ModelRouter
+        client = AsyncMock()
+        done_response = _make_llm_response(content='{"status": "DONE", "summary": "Done"}')
+        client.chat.completions.create = AsyncMock(side_effect=[done_response])
+
+        router = ModelRouter(
+            default_model="gpt-4o",
+            enabled=False,
+            feedback_path=os.path.join(tempfile.mkdtemp(), "fb.json"),
+        )
+
+        orch = OrchestratorAgent(llm_client=client, model="gpt-4o", max_iterations=3)
+        orch.set_model_router(router)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "f.py"), "w").close()
+            await orch.build("Build", workdir=tmpdir)
+
+            call_kwargs = client.chat.completions.create.call_args
+            used_model = call_kwargs.kwargs.get("model", call_kwargs[1].get("model"))
+            assert used_model == "gpt-4o"

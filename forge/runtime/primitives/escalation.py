@@ -38,20 +38,32 @@ class EscalationPolicy:
         self,
         steps: list[EscalationStep] | None = None,
         max_total_attempts: int = 10,
+        enabled_levels: set[EscalationLevel] | None = None,
     ):
-        self.steps = steps or [
+        default_steps = [
             EscalationStep(level=EscalationLevel.RETRY, max_attempts=3),
             EscalationStep(level=EscalationLevel.DIFFERENT_MODEL, max_attempts=2, model_override="gpt-4"),
             EscalationStep(level=EscalationLevel.HUMAN, max_attempts=1),
         ]
+        all_steps = steps or default_steps
+        # Filter to only enabled levels when specified
+        if enabled_levels is not None:
+            all_steps = [s for s in all_steps if s.level in enabled_levels]
+        self.steps = all_steps
         self.max_total_attempts = max_total_attempts
+        self._enabled_levels = enabled_levels
         self._attempt_count = 0
         self._current_step_idx = 0
         self._step_attempts: dict[int, int] = {}
 
     def should_escalate(self, success: bool) -> bool:
-        """Check if we should try the next escalation level."""
+        """Check if we should try the next escalation level.
+        
+        On success, resets internal state and returns False.
+        On failure, increments attempt count and checks if escalation is available.
+        """
         if success:
+            self.reset()
             return False
         self._attempt_count += 1
         if self._attempt_count >= self.max_total_attempts:

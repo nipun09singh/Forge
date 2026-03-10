@@ -83,7 +83,8 @@ def main():
 @click.option("--base-url", envvar="OPENAI_BASE_URL", help="OpenAI-compatible API base URL")
 @click.option("--pack", "-p", type=click.Choice(["saas_support", "ecommerce", "real_estate"]), help="Use a pre-built domain pack (no API key needed)")
 @click.option("--founder-mode", is_flag=True, help="Founder mode: let the AI decide agents instead of injecting mandatory archetypes")
-def create(domain, file, output, model, overwrite, api_key, base_url, pack, founder_mode):
+@click.option("--force", is_flag=True, help="Generate agency even if quality score is below threshold")
+def create(domain, file, output, model, overwrite, api_key, base_url, pack, founder_mode, force):
     """Create a new AI agency from a domain description.
     
     Provide a domain description as an argument or via --file.
@@ -175,14 +176,18 @@ def create(domain, file, output, model, overwrite, api_key, base_url, pack, foun
     )
 
     try:
-        blueprint, output_path = run_async(engine.create_agency(domain_text, overwrite=overwrite, inject_archetypes_flag=not founder_mode))
+        blueprint, output_path = run_async(engine.create_agency(domain_text, overwrite=overwrite, inject_archetypes_flag=not founder_mode, force=force))
     except FileExistsError as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
         console.print("Use --overwrite to replace the existing agency.")
         sys.exit(1)
     except Exception as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        console.print(f"\n[dim]For debug output, set FORGE_DEBUG=1[/dim]")
+        from forge.core.engine import QualityGateError
+        if isinstance(e, QualityGateError):
+            console.print(f"[bold red]Quality Gate Failed:[/bold red] {e}")
+        else:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            console.print(f"\n[dim]For debug output, set FORGE_DEBUG=1[/dim]")
         sys.exit(1)
 
     _print_getting_started(output_path, blueprint)

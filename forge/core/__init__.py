@@ -11,7 +11,7 @@ from forge.core.blueprint import (
     WorkflowStep,
 )
 from forge.core.domain_analyzer import DomainAnalyzer
-from forge.core.engine import ForgeEngine
+from forge.core.engine import ForgeEngine, QualityGateError
 from forge.core.llm import LLMClient
 from forge.core.quality import BlueprintEvaluator, QualityRubric, QualityScore, QualityDimension, format_quality_report
 from forge.core.critic import BlueprintCritic, RefinementLoop, CritiqueResult
@@ -29,6 +29,7 @@ __all__ = [
     "ForgeEngine",
     "LLMClient",
     "QualityDimension",
+    "QualityGateError",
     "QualityRubric",
     "QualityScore",
     "RefinementLoop",

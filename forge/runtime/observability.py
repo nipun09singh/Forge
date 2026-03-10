@@ -78,30 +78,38 @@ class TraceContext:
     
     A single user request gets one trace_id. Every sub-operation gets a span_id.
     This allows tracing a request through: Agency → Planner → Team → Agent → Tools.
+
+    All span stack operations are protected by a threading.Lock for safe use
+    in async and multi-threaded environments.
     """
 
     def __init__(self, trace_id: str | None = None):
         self.trace_id = trace_id or f"trace-{uuid.uuid4().hex[:12]}"
         self._span_stack: list[str] = []
+        self._lock = threading.Lock()
 
     def new_span(self) -> str:
         """Create a new span within this trace."""
         span_id = f"span-{uuid.uuid4().hex[:8]}"
-        self._span_stack.append(span_id)
+        with self._lock:
+            self._span_stack.append(span_id)
         return span_id
 
     def current_span(self) -> str:
         """Get the current span ID."""
-        return self._span_stack[-1] if self._span_stack else ""
+        with self._lock:
+            return self._span_stack[-1] if self._span_stack else ""
 
     def end_span(self) -> str | None:
         """End the current span."""
-        return self._span_stack.pop() if self._span_stack else None
+        with self._lock:
+            return self._span_stack.pop() if self._span_stack else None
 
     def child(self) -> TraceContext:
         """Create a child trace context sharing the same trace_id."""
-        child_ctx = TraceContext(trace_id=self.trace_id)
-        child_ctx._span_stack = list(self._span_stack)
+        with self._lock:
+            child_ctx = TraceContext(trace_id=self.trace_id)
+            child_ctx._span_stack = list(self._span_stack)
         return child_ctx
 
 

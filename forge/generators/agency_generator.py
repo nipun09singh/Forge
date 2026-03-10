@@ -6,6 +6,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from jinja2 import Environment, FileSystemLoader
+
 from forge.core.blueprint import AgencyBlueprint
 from forge.generators.agent_generator import AgentGenerator
 from forge.generators.tool_generator import ToolGenerator
@@ -13,6 +15,8 @@ from forge.generators.orchestration_gen import OrchestrationGenerator
 from forge.generators.deployment_gen import DeploymentGenerator
 
 logger = logging.getLogger(__name__)
+
+TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 
 
 class AgencyGenerator:
@@ -33,6 +37,11 @@ class AgencyGenerator:
         self.tool_gen = ToolGenerator()
         self.orchestration_gen = OrchestrationGenerator()
         self.deployment_gen = DeploymentGenerator()
+        self.env = Environment(
+            loader=FileSystemLoader(str(TEMPLATE_DIR)),
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
 
     def generate(self, blueprint: AgencyBlueprint, overwrite: bool = False) -> Path:
         """
@@ -110,87 +119,12 @@ class AgencyGenerator:
 
     def _generate_selftest(self, blueprint: AgencyBlueprint, output_dir: Path) -> Path:
         """Generate a self-test script for the agency."""
-        test_content = '''"""Self-test — verifies this generated agency is correctly structured."""
-
-import sys
-
-def test_agency():
-    """Test that the agency can be built and has the expected structure."""
-    results = []
-    
-    def check(name, condition, detail=""):
-        status = "PASS" if condition else "FAIL"
-        results.append((name, condition))
-        print(f"  {'✅' if condition else '❌'} {status}: {name}")
-        if detail and not condition:
-            print(f"       → {detail}")
-
-    print("\\n🔨 Agency Self-Test\\n")
-
-    # Test 1: Can we import the main module?
-    try:
-        from main import build_agency
-        check("Import main.py", True)
-    except Exception as e:
-        check("Import main.py", False, str(e))
-        print("\\n❌ CRITICAL: Cannot import main.py. Check forge/runtime is packaged correctly.")
-        return False
-
-    # Test 2: Can we build the agency?
-    try:
-        agency, event_log = build_agency()
-        check("Build agency", True)
-    except Exception as e:
-        check("Build agency", False, str(e))
-        return False
-
-    # Test 3: Agency has teams
-    check("Has teams", len(agency.teams) > 0, f"Teams: {list(agency.teams.keys())}")
-
-    # Test 4: Agency has agents
-    total_agents = sum(
-        len(t.agents) + (1 if t.lead else 0) 
-        for t in agency.teams.values()
-    )
-    check(f"Has agents ({total_agents})", total_agents > 0)
-
-    # Test 5: Event log works
-    check("Event log initialized", event_log is not None)
-
-    # Test 6: Memory works
-    agency.memory.store("selftest", "working")
-    val = agency.memory.recall("selftest")
-    check("Memory store/recall", val == "working")
-
-    # Test 7: API server importable
-    try:
-        import importlib
-        spec = importlib.util.find_spec("api_server")
-        check("API server importable", spec is not None)
-    except Exception:
-        check("API server importable", True)  # Best effort
-
-    # Test 8: Blueprint exists
-    from pathlib import Path
-    check("blueprint.json exists", Path("blueprint.json").exists())
-
-    # Summary
-    passed = sum(1 for _, ok in results if ok)
-    total = len(results)
-    print(f"\\n{'='*40}")
-    print(f"Results: {passed}/{total} passed")
-    if passed == total:
-        print("🎉 All tests passed! Agency is ready.")
-    else:
-        print(f"⚠️  {total - passed} test(s) failed. Check the errors above.")
-    print(f"{'='*40}\\n")
-    return passed == total
-
-
-if __name__ == "__main__":
-    success = test_agency()
-    sys.exit(0 if success else 1)
-'''
+        template = self.env.get_template("selftest.py.j2")
+        test_content = template.render(
+            agency_name=blueprint.name,
+            agency_description=blueprint.description,
+            expected_teams=len(blueprint.teams),
+        )
         test_path = output_dir / "test_agency.py"
         test_path.write_text(test_content, encoding="utf-8")
         logger.info(f"Generated self-test: {test_path}")
