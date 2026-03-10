@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -601,7 +602,7 @@ def dashboard(agency_path, port, api_url):
         # Inject the API base URL
         html = html.replace(
             "const API_BASE = window.location.origin;",
-            f'const API_BASE = "{target_api}";',
+            f'const API_BASE = {json.dumps(target_api)};',
         )
         return HTMLResponse(content=html)
 

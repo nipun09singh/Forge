@@ -191,9 +191,11 @@ def _is_command_safe(
             return False, f"Blocked dangerous pattern: '{blocked}'"
 
     # Block piping to shell interpreters from network tools
-    if (("curl " in cmd_lower or "wget " in cmd_lower) and
-        ("|" in cmd_lower and any(sh in cmd_lower.split("|")[-1] for sh in ["bash", "sh", "zsh", "python", "perl"]))):
-        return False, "Blocked: piping network output to shell interpreter"
+    if ("curl " in cmd_lower or "wget " in cmd_lower) and "|" in cmd_lower:
+        pipe_segments = cmd_lower.split("|")
+        for segment in pipe_segments[1:]:
+            if any(sh in segment.strip() for sh in ["bash", "sh", "zsh", "python", "perl", "ruby", "node"]):
+                return False, "Blocked: piping to shell interpreter"
 
     # Block encoded payload execution
     if "base64" in cmd_lower and ("|" in cmd_lower or ">" in cmd_lower):

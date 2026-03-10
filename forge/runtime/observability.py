@@ -242,6 +242,9 @@ class PersistentEventStore:
         """Write a single event to SQLite."""
         with self._lock:
             conn = self._get_conn()
+            if conn is None:
+                logger.warning("PersistentEventStore: database connection not initialized")
+                return
             conn.execute(
                 "INSERT OR REPLACE INTO events "
                 "(id, timestamp, event_type, agent, data, trace_id, span_id, "

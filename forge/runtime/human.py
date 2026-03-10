@@ -233,7 +233,8 @@ class WebhookApprovalGate(HumanApprovalGate):
                                 feedback=data.get("feedback", ""),
                                 modified_action=data.get("modified_action", ""),
                             )
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Webhook poll attempt failed: {e}")
                     continue
 
         # Timeout — reject by default

@@ -68,7 +68,9 @@ class EscalationPolicy:
         self._attempt_count += 1
         if self._attempt_count >= self.max_total_attempts:
             return False
-        return self._current_step_idx < len(self.steps)
+        if self._current_step_idx >= len(self.steps):
+            return False
+        return True
 
     def get_next_action(self) -> EscalationStep | None:
         """Get the current escalation action."""

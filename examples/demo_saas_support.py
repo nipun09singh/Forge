@@ -254,14 +254,18 @@ async def run_demo():
     print(f"  🎫 Ticket check T100: {ticket_result}")
 
     # Demonstrate file tool
-    from forge.runtime.integrations.file_tool import read_write_file
+    from forge.runtime.integrations.file_tool import create_file_tool
+    _file_tool = create_file_tool()
+    read_write_file = _file_tool._fn
     write_result = await read_write_file("write", "test_note.txt", "Support note: Customer C001 contacted about dashboard access.")
     print(f"  📄 File write: {write_result}")
     read_result = await read_write_file("read", "test_note.txt")
     print(f"  📖 File read: {read_result}")
 
     # Demonstrate SQL tool
-    from forge.runtime.integrations.sql_tool import query_database
+    from forge.runtime.integrations.sql_tool import create_sql_tool
+    _sql_tool = create_sql_tool()
+    query_database = _sql_tool._fn
     await query_database("CREATE TABLE IF NOT EXISTS tickets (id TEXT, customer TEXT, status TEXT, priority TEXT)", db_path="./demo_data/support.db")
     await query_database("INSERT OR REPLACE INTO tickets VALUES ('T100', 'C001', 'open', 'high')", db_path="./demo_data/support.db")
     sql_result = await query_database("SELECT * FROM tickets", db_path="./demo_data/support.db")

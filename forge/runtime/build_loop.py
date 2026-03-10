@@ -17,6 +17,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -71,11 +72,13 @@ class BuildLoop:
         4. If failure: feed errors back to LLM, get fix, repeat
         """
         from forge.runtime.integrations.command_tool import run_command
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         import os
 
         os.makedirs(workdir, exist_ok=True)
         os.environ.setdefault("AGENCY_DATA_DIR", workdir)
+        _file_tool = create_file_tool(workdir)
+        read_write_file = _file_tool._fn
 
         start_time = time.time()
         build_log = []
@@ -117,7 +120,7 @@ class BuildLoop:
             for filename, code in extracted_files.items():
                 filepath = f"{workdir}/{filename}"
                 # Create parent directories
-                parent = "/".join(filepath.split("/")[:-1])
+                parent = Path(filepath).parent
                 if parent:
                     os.makedirs(parent, exist_ok=True)
                 
@@ -169,7 +172,10 @@ class BuildLoop:
                     logger.info(f"  {cmd_name} PASSED")
 
             # Step 4: If all passed, we're done!
-            if all_passed or not (self.build_command or self.test_command or self.lint_command):
+            has_commands = bool(self.build_command or self.test_command or self.lint_command)
+            if not has_commands:
+                logger.warning("No build, test, or lint commands configured — cannot verify code")
+            if all_passed and has_commands:
                 duration = (time.time() - start_time) * 1000
                 logger.info(f"Build loop SUCCESS in {attempt + 1} attempt(s)")
                 return BuildResult(

@@ -802,8 +802,8 @@ def inject_archetypes(
         return blueprint
 
     # Separate quality vs revenue agents
-    quality_agents = [a for a in agents_to_add if a.name in ("Strategic Planner", "QA Reviewer", "Intake Coordinator", "Self-Improvement Agent", "Analytics Agent")]
-    revenue_agents = [a for a in agents_to_add if a.name in ("Growth Hacker", "Customer Success Agent", "Lead Generation Agent", "Revenue Optimizer")]
+    quality_agents = [a for a in agents_to_add if a.name.lower() in ("strategic planner", "qa reviewer", "intake coordinator", "self-improvement agent", "analytics agent")]
+    revenue_agents = [a for a in agents_to_add if a.name.lower() in ("growth hacker", "customer success agent", "lead generation agent", "revenue optimizer")]
 
     new_teams = []
 

@@ -108,7 +108,7 @@ class QualityGate:
             )
         except Exception as e:
             logger.warning(f"Quality gate evaluation failed: {e}")
-            return QualityVerdict(passed=True, score=0.7, feedback=f"Evaluation error: {e}", iteration=iteration)
+            return QualityVerdict(passed=False, score=0.0, feedback=f"Evaluation error: {e}", iteration=iteration)
 
 
 # =============================================================================

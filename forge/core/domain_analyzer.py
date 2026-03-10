@@ -48,28 +48,28 @@ class DomainAnalyzer:
         try:
             domain_analysis = await self._analyze_domain(domain_description)
         except Exception as e:
-            logger.error(f"Phase 1 failed: {e}. Using fallback analysis.")
+            logger.warning(f"Phase 1 (Domain Analysis) failed: {e}, using default")
             domain_analysis = {"agency_name": "AI Agency", "description": domain_description[:200], "env_vars": {}}
 
         logger.info("Phase 2: Designing agent roles...")
         try:
             agents = await self._design_agents(domain_description, domain_analysis)
         except Exception as e:
-            logger.error(f"Phase 2 failed: {e}. Using minimal agent set.")
+            logger.warning(f"Phase 2 (Role Design) failed: {e}, using default")
             agents = []
 
         logger.info("Phase 3: Designing tools...")
         try:
             agents_with_tools, shared_tools = await self._design_tools(domain_description, domain_analysis, agents)
         except Exception as e:
-            logger.error(f"Phase 3 failed: {e}. Proceeding without custom tools.")
+            logger.warning(f"Phase 3 (Tool Design) failed: {e}, using default")
             agents_with_tools, shared_tools = agents, []
 
         logger.info("Phase 4: Organizing teams...")
         try:
             teams = await self._organize_teams(domain_description, domain_analysis, agents_with_tools)
         except Exception as e:
-            logger.error(f"Phase 4 failed: {e}. Using flat team structure.")
+            logger.warning(f"Phase 4 (Team Organization) failed: {e}, using default")
             from forge.core.blueprint import TeamBlueprint
             teams = [TeamBlueprint(name="Main Team", description="Primary team", agents=agents_with_tools, lead=agents_with_tools[0] if agents_with_tools else None)]
 
@@ -77,14 +77,14 @@ class DomainAnalyzer:
         try:
             workflows = await self._design_workflows(domain_description, domain_analysis, teams)
         except Exception as e:
-            logger.error(f"Phase 5 failed: {e}. Proceeding without workflows.")
+            logger.warning(f"Phase 5 (Workflow Design) failed: {e}, using default")
             workflows = []
 
         logger.info("Phase 6: Designing API...")
         try:
             api_endpoints = await self._design_api(domain_description, domain_analysis, teams)
         except Exception as e:
-            logger.error(f"Phase 6 failed: {e}. Using default API endpoints.")
+            logger.warning(f"Phase 6 (API Design) failed: {e}, using default")
             api_endpoints = []
 
         # Build the final blueprint

@@ -52,7 +52,7 @@ class AgentGenerator:
             agent_name=blueprint.name,
             title=blueprint.title,
             role=blueprint.role.value,
-            system_prompt=blueprint.system_prompt.replace('"""', '\\"\\"\\"'),
+            system_prompt=blueprint.system_prompt.replace('\\', '\\\\').replace('"""', '""\\"'),
             tools=tools_data,
             model=blueprint.model,
             temperature=blueprint.temperature,

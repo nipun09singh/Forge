@@ -278,7 +278,17 @@ class Planner:
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content or "{}"
-            data = json.loads(content)
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.warning(f"LLM returned non-JSON plan, falling back to single step: {e}")
+                plan = TaskPlan(
+                    task=task,
+                    steps=[PlanStep(id="step-1", description=task)],
+                    status="pending",
+                )
+                self._active_plans[plan.id] = plan
+                return plan
 
             steps = []
             for s in data.get("steps", []):

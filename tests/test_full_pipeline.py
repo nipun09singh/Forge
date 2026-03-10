@@ -98,9 +98,11 @@ class TestBuiltinToolsDirect:
 
     @pytest.mark.asyncio
     async def test_file_tool(self):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["AGENCY_DATA_DIR"] = tmp
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             result = json.loads(await read_write_file("write", "test.txt", "hello"))
             assert result["success"]
             result = json.loads(await read_write_file("read", "test.txt"))
@@ -108,10 +110,12 @@ class TestBuiltinToolsDirect:
 
     @pytest.mark.asyncio
     async def test_sql_tool(self):
-        from forge.runtime.integrations.sql_tool import query_database
+        from forge.runtime.integrations.sql_tool import create_sql_tool
         import gc
         with tempfile.TemporaryDirectory() as tmp:
             db = os.path.join(tmp, "test.db")
+            tool = create_sql_tool(db_path=db)
+            query_database = tool._fn
             await query_database("CREATE TABLE t (id INTEGER, name TEXT)", db_path=db)
             await query_database("INSERT INTO t VALUES (1, 'Alice')", db_path=db)
             result = json.loads(await query_database("SELECT * FROM t", db_path=db))
@@ -120,7 +124,9 @@ class TestBuiltinToolsDirect:
 
     @pytest.mark.asyncio
     async def test_sql_blocks_drop(self):
-        from forge.runtime.integrations.sql_tool import query_database
+        from forge.runtime.integrations.sql_tool import create_sql_tool
+        tool = create_sql_tool()
+        query_database = tool._fn
         result = json.loads(await query_database("DROP TABLE users"))
         assert "error" in result
 

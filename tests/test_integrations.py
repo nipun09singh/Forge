@@ -6,8 +6,8 @@ import tempfile
 import pytest
 
 from forge.runtime.integrations import BuiltinToolkit
-from forge.runtime.integrations.file_tool import create_file_tool, read_write_file
-from forge.runtime.integrations.sql_tool import create_sql_tool, query_database
+from forge.runtime.integrations.file_tool import create_file_tool
+from forge.runtime.integrations.sql_tool import create_sql_tool
 
 
 class TestBuiltinToolkit:
@@ -29,6 +29,8 @@ class TestFileTool:
     @pytest.mark.asyncio
     async def test_write_and_read(self, tmp_dir):
         os.environ["AGENCY_DATA_DIR"] = tmp_dir
+        tool = create_file_tool(tmp_dir)
+        read_write_file = tool._fn
         result = await read_write_file("write", "test.txt", "hello world")
         data = json.loads(result)
         assert data["success"]
@@ -40,6 +42,8 @@ class TestFileTool:
     @pytest.mark.asyncio
     async def test_list_files(self, tmp_dir):
         os.environ["AGENCY_DATA_DIR"] = tmp_dir
+        tool = create_file_tool(tmp_dir)
+        read_write_file = tool._fn
         await read_write_file("write", "a.txt", "aaa")
         result = await read_write_file("list", ".")
         data = json.loads(result)
@@ -48,6 +52,8 @@ class TestFileTool:
     @pytest.mark.asyncio
     async def test_path_traversal_blocked(self, tmp_dir):
         os.environ["AGENCY_DATA_DIR"] = tmp_dir
+        tool = create_file_tool(tmp_dir)
+        read_write_file = tool._fn
         result = await read_write_file("read", "../../etc/passwd")
         data = json.loads(result)
         assert "error" in data or "denied" in str(data).lower()
@@ -57,6 +63,8 @@ class TestSQLTool:
     @pytest.mark.asyncio
     async def test_create_and_query(self, tmp_dir):
         db = os.path.join(tmp_dir, "test.db")
+        tool = create_sql_tool(db_path=db)
+        query_database = tool._fn
         await query_database("CREATE TABLE users (id INTEGER, name TEXT)", db_path=db)
         await query_database("INSERT INTO users VALUES (1, 'Alice')", db_path=db)
         result = await query_database("SELECT * FROM users", db_path=db)
@@ -67,6 +75,8 @@ class TestSQLTool:
     @pytest.mark.asyncio
     async def test_destructive_blocked(self, tmp_dir):
         db = os.path.join(tmp_dir, "test.db")
+        tool = create_sql_tool(db_path=db)
+        query_database = tool._fn
         result = await query_database("DROP TABLE users", db_path=db)
         data = json.loads(result)
         assert "error" in data

@@ -190,6 +190,7 @@ class OrchestratorAgent:
                 f"  ⚠️ Medium confidence ({confidence.score:.2f}): {confidence.reasoning}"
             )
 
+        _tool_start = time.time()
         try:
             # Set workdir for command/file tools
             if fn_name == "run_command" and "workdir" not in args:

@@ -82,7 +82,7 @@ def _init_auth() -> tuple[str, bool]:
         logger.warning("=" * 60)
         logger.warning("WARNING: AGENCY_API_KEY not set.")
         logger.warning("Generated a random API key for this session:")
-        logger.warning(f"  AGENCY_API_KEY={api_key}")
+        logger.warning(f"  AGENCY_API_KEY=...{api_key[-8:]}")
         logger.warning("Set the AGENCY_API_KEY env var for a persistent key.")
         logger.warning("=" * 60)
 

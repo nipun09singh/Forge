@@ -72,8 +72,9 @@ class FileDropChannel(InboundChannel):
             return items
 
         for f in self.watch_dir.iterdir():
-            if f.is_file() and f.name not in self._seen and not f.name.startswith("."):
-                self._seen.add(f.name)
+            canonical = str(f.resolve())
+            if f.is_file() and canonical not in self._seen and not f.name.startswith("."):
+                self._seen.add(canonical)
                 try:
                     content = f.read_text(encoding="utf-8", errors="replace")
                     items.append(InboundItem(

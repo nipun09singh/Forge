@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from forge.runtime.tools import Tool, ToolParameter
+from forge.runtime.integrations.http_tool import _is_url_safe
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +62,9 @@ async def browse_web(url: str, extract: str = "text") -> str:
         extract: What to extract: "text" (page text), "links" (all links), "raw" (raw HTML)
     """
     # SSRF protection: reuse http_tool's URL validation
-    try:
-        from forge.runtime.integrations.http_tool import _is_url_safe
-        safe, reason = _is_url_safe(url)
-        if not safe:
-            return json.dumps({"url": url, "error": f"BLOCKED: {reason}"})
-    except ImportError:
-        pass  # If http_tool not available, proceed without check
+    safe, reason = _is_url_safe(url)
+    if not safe:
+        return json.dumps({"url": url, "error": f"BLOCKED: {reason}"})
 
     try:
         import http.cookiejar

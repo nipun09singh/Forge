@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 from typing import Any
 from forge.runtime.tools import Tool, ToolParameter
+from forge.runtime.integrations.http_tool import _is_url_safe
 
 
 async def send_webhook(url: str, payload: str, method: str = "POST") -> str:
@@ -17,13 +18,9 @@ async def send_webhook(url: str, payload: str, method: str = "POST") -> str:
         return rate_limit_error("send_webhook", limiter, "webhook")
 
     # SSRF protection: reuse http_tool's URL validation
-    try:
-        from forge.runtime.integrations.http_tool import _is_url_safe
-        safe, reason = _is_url_safe(url)
-        if not safe:
-            return json.dumps({"success": False, "error": f"BLOCKED: {reason}"})
-    except ImportError:
-        pass  # If http_tool not available, proceed without check
+    safe, reason = _is_url_safe(url)
+    if not safe:
+        return json.dumps({"success": False, "error": f"BLOCKED: {reason}"})
 
     # Validate payload is valid JSON
     try:

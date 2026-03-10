@@ -374,6 +374,8 @@ class Agent:
                     duration_seconds=time.time() - self._exec_start_time,
                     iterations_used=self.max_iterations,
                 ))
+            if not self.conversation:
+                return TaskResult(success=False, output="No conversation history")
             return TaskResult(
                 success=False,
                 output=self.conversation[-1].get("content", "Max iterations reached."),
@@ -609,7 +611,8 @@ class Agent:
         fn_name = tc["function"]["name"]
         try:
             args = json.loads(tc["function"]["arguments"])
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON in tool call args for {fn_name}: {e}")
             args = {}
 
         # Guardrails check

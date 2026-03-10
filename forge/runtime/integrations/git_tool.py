@@ -32,25 +32,24 @@ async def git_operation(operation: str, args: str = "", workdir: str = ".") -> s
     op = operation.lower().strip()
     safe_args = _sanitize_git_args(args)
     
-    # Only quote args that are a single semantic value (e.g., commit message).
-    # Multi-arg operations (add, checkout, diff, etc.) pass sanitized args directly.
-    quoted_msg = shlex.quote(safe_args) if safe_args else ""
+    # Quote all user-provided arguments to prevent shell injection
+    quoted_args = shlex.quote(safe_args) if safe_args else ""
     
     command_map = {
         "init": "git init",
         "status": "git status",
-        "add": f"git add {safe_args}" if safe_args else "git add .",
-        "commit": f"git commit -m {quoted_msg}" if safe_args else 'git commit -m "Auto-commit by agent"',
-        "branch": f"git branch {safe_args}" if safe_args else "git branch",
-        "checkout": f"git checkout {safe_args}",
-        "diff": f"git diff {safe_args}" if safe_args else "git diff",
-        "log": f"git log --oneline -20 {safe_args}".strip(),
-        "push": f"git push {safe_args}" if safe_args else "git push",
-        "pull": f"git pull {safe_args}" if safe_args else "git pull",
-        "clone": f"git clone {safe_args}",
-        "stash": f"git stash {safe_args}" if safe_args else "git stash",
-        "reset": f"git reset {safe_args}" if safe_args else "git reset",
-        "merge": f"git merge {safe_args}",
+        "add": f"git add {quoted_args}" if safe_args else "git add .",
+        "commit": f"git commit -m {quoted_args}" if safe_args else 'git commit -m "Auto-commit by agent"',
+        "branch": f"git branch {quoted_args}" if safe_args else "git branch",
+        "checkout": f"git checkout {quoted_args}",
+        "diff": f"git diff {quoted_args}" if safe_args else "git diff",
+        "log": f"git log --oneline -20 {quoted_args}".strip(),
+        "push": f"git push {quoted_args}" if safe_args else "git push",
+        "pull": f"git pull {quoted_args}" if safe_args else "git pull",
+        "clone": f"git clone {quoted_args}",
+        "stash": f"git stash {quoted_args}" if safe_args else "git stash",
+        "reset": f"git reset {quoted_args}" if safe_args else "git reset",
+        "merge": f"git merge {quoted_args}",
     }
 
     if op not in command_map:

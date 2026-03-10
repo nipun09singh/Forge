@@ -49,7 +49,7 @@ class BinaryCritic(CriticBase):
                 return CriticVerdict(passed=False, score=0.0, feedback=f"Check error: {e}")
 
         # Default: passes if output is non-empty and not an error
-        passed = bool(output) and "error" not in output.lower()[:50]
+        passed = bool(output) and "error" not in output.lower()
         return CriticVerdict(passed=passed, score=1.0 if passed else 0.0)
 
 
@@ -87,7 +87,8 @@ class ScoredCritic(CriticBase):
                 issues=data.get("issues", []),
             )
         except Exception as e:
-            return CriticVerdict(passed=True, score=0.7, feedback=f"Evaluation error: {e}")
+            logger.warning("ScoredCritic evaluation failed: %s", e)
+            return CriticVerdict(passed=False, score=0.0, feedback=f"Evaluation error: {e}")
 
     def __repr__(self) -> str:
         return f"ScoredCritic(min_score={self.min_score})"
@@ -129,7 +130,8 @@ class FactualCritic(CriticBase):
                 issues=data.get("unsupported_claims", []),
             )
         except Exception as e:
-            return CriticVerdict(passed=True, score=0.7, feedback=f"Fact-check error: {e}")
+            logger.warning("FactualCritic evaluation failed: %s", e)
+            return CriticVerdict(passed=False, score=0.0, feedback=f"Fact-check error: {e}")
 
 
 class ComplianceCritic(CriticBase):

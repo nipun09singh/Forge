@@ -383,5 +383,5 @@ class RefinementLoop:
             logger.info(f"Auto-refinement produced updated blueprint: {improved.name}")
             return improved
         except Exception as e:
-            logger.error(f"Auto-refinement failed: {e}. Returning original blueprint.")
+            logger.warning(f"Auto-refinement failed: {e}. Returning original blueprint.")
             return blueprint

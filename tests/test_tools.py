@@ -126,9 +126,11 @@ class TestFileTool:
 
     @pytest.mark.asyncio
     async def test_write_and_read(self, monkeypatch):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.setenv("AGENCY_DATA_DIR", tmp)
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             write_res = json.loads(await read_write_file("write", "hello.txt", "Hello World"))
             assert write_res["success"] is True
 
@@ -137,9 +139,11 @@ class TestFileTool:
 
     @pytest.mark.asyncio
     async def test_append(self, monkeypatch):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.setenv("AGENCY_DATA_DIR", tmp)
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             await read_write_file("write", "log.txt", "Line1\n")
             await read_write_file("append", "log.txt", "Line2\n")
             read_res = json.loads(await read_write_file("read", "log.txt"))
@@ -148,9 +152,11 @@ class TestFileTool:
 
     @pytest.mark.asyncio
     async def test_list_directory(self, monkeypatch):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.setenv("AGENCY_DATA_DIR", tmp)
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             await read_write_file("write", "a.txt", "aaa")
             await read_write_file("write", "b.txt", "bbb")
             list_res = json.loads(await read_write_file("list", "."))
@@ -160,9 +166,11 @@ class TestFileTool:
 
     @pytest.mark.asyncio
     async def test_delete(self, monkeypatch):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.setenv("AGENCY_DATA_DIR", tmp)
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             await read_write_file("write", "tmp.txt", "data")
             del_res = json.loads(await read_write_file("delete", "tmp.txt"))
             assert del_res["success"] is True
@@ -171,18 +179,22 @@ class TestFileTool:
 
     @pytest.mark.asyncio
     async def test_path_traversal_blocked(self, monkeypatch):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.setenv("AGENCY_DATA_DIR", tmp)
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             res = json.loads(await read_write_file("read", "../../../etc/passwd"))
             assert "error" in res
             assert "denied" in res["error"].lower() or "outside" in res["error"].lower()
 
     @pytest.mark.asyncio
     async def test_unknown_action(self, monkeypatch):
-        from forge.runtime.integrations.file_tool import read_write_file
+        from forge.runtime.integrations.file_tool import create_file_tool
         with tempfile.TemporaryDirectory() as tmp:
             monkeypatch.setenv("AGENCY_DATA_DIR", tmp)
+            tool = create_file_tool(tmp)
+            read_write_file = tool._fn
             res = json.loads(await read_write_file("explode", "x.txt"))
             assert "error" in res
 

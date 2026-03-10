@@ -120,6 +120,9 @@ class ToolGenerator:
                 f'{BUILTIN_TOOL_MAP[builtin].format(name=safe_name)}\n'
             )
             logger.info(f"Using built-in integration for tool: {blueprint.name} → {builtin}")
+            output_path = output_dir / f"tool_{self._sanitize_name(blueprint.name)}.py"
+            output_path.write_text(content, encoding="utf-8")
+            return output_path
         else:
             # Domain-specific tool: generate a functional mock-backed tool
             # If a backend_ref is provided, try importing the real implementation
